@@ -1,0 +1,30 @@
+{
+  "collectionName": "components_util_forms",
+  "info": {
+    "displayName": "Form",
+    "icon": "file"
+  },
+  "options": {},
+  "attributes": {
+    "Title": {
+      "type": "string"
+    },
+    "ContactEmail": {
+      "type": "email"
+    },
+    "PhoneNumber": {
+      "type": "string"
+    },
+    "socials": {
+      "type": "relation",
+      "relation": "oneToMany",
+      "target": "api::social.social"
+    },
+    "CTAText": {
+      "type": "string"
+    },
+    "CTALink": {
+      "type": "string"
+    }
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "kind": "singleType",
+  "collectionName": "home_heroes",
+  "info": {
+    "singularName": "home-hero",
+    "pluralName": "home-heroes",
+    "displayName": "Home-Hero"
+  },
+  "options": {
+    "draftAndPublish": true
+  },
+  "pluginOptions": {},
+  "attributes": {
+    "Title": {
+      "type": "string"
+    },
+    "Description": {
+      "type": "text"
+    },
+    "CTAText": {
+      "type": "string"
+    },
+    "BackgroundVideo": {
+      "allowedTypes": [
+        "images",
+        "files",
+        "videos",
+        "audios"
+      ],
+      "type": "media",
+      "multiple": false
+    },
+    "CTALink": {
+      "type": "string"
+    }
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "kind": "singleType",
+  "collectionName": "commons",
+  "info": {
+    "singularName": "common",
+    "pluralName": "commons",
+    "displayName": "Common",
+    "description": ""
+  },
+  "options": {
+    "draftAndPublish": true
+  },
+  "pluginOptions": {},
+  "attributes": {
+    "logo": {
+      "type": "media",
+      "multiple": false,
+      "required": false,
+      "allowedTypes": [
+        "images",
+        "files",
+        "videos",
+        "audios"
+      ]
+    },
+    "socials": {
+      "type": "relation",
+      "relation": "oneToMany",
+      "target": "api::social.social"
+    }
+  }
+}

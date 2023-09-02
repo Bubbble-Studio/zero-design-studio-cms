@@ -1,0 +1,43 @@
+{
+  "kind": "singleType",
+  "collectionName": "home_market_places",
+  "info": {
+    "singularName": "home-market-place",
+    "pluralName": "home-market-places",
+    "displayName": "Home-MarketPlace"
+  },
+  "options": {
+    "draftAndPublish": true
+  },
+  "pluginOptions": {},
+  "attributes": {
+    "Title": {
+      "type": "string"
+    },
+    "Description": {
+      "type": "text"
+    },
+    "CTA_Link": {
+      "type": "string"
+    },
+    "CTA_Text": {
+      "type": "string"
+    },
+    "Images": {
+      "allowedTypes": [
+        "images",
+        "files",
+        "videos",
+        "audios"
+      ],
+      "type": "media",
+      "multiple": true
+    },
+    "Contact_CTA_Text": {
+      "type": "string"
+    },
+    "Contact_CTA_Link": {
+      "type": "string"
+    }
+  }
+}

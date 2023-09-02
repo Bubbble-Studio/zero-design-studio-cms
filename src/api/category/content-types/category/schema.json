@@ -1,0 +1,27 @@
+{
+  "kind": "collectionType",
+  "collectionName": "categories",
+  "info": {
+    "singularName": "category",
+    "pluralName": "categories",
+    "displayName": "Work Category"
+  },
+  "options": {
+    "draftAndPublish": true
+  },
+  "pluginOptions": {},
+  "attributes": {
+    "Name": {
+      "type": "string"
+    },
+    "Description": {
+      "type": "text"
+    },
+    "Works": {
+      "type": "relation",
+      "relation": "oneToMany",
+      "target": "api::work.work",
+      "mappedBy": "category"
+    }
+  }
+}

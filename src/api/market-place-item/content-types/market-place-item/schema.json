@@ -1,0 +1,47 @@
+{
+  "kind": "collectionType",
+  "collectionName": "market_place_items",
+  "info": {
+    "singularName": "market-place-item",
+    "pluralName": "market-place-items",
+    "displayName": "Market Place Item"
+  },
+  "options": {
+    "draftAndPublish": true
+  },
+  "pluginOptions": {},
+  "attributes": {
+    "Title": {
+      "type": "string"
+    },
+    "Description": {
+      "type": "text"
+    },
+    "CTAText": {
+      "type": "string"
+    },
+    "CTALink": {
+      "type": "string"
+    },
+    "Video": {
+      "allowedTypes": [
+        "images",
+        "files",
+        "videos",
+        "audios"
+      ],
+      "type": "media",
+      "multiple": false
+    },
+    "Thumbnail": {
+      "allowedTypes": [
+        "images",
+        "files",
+        "videos",
+        "audios"
+      ],
+      "type": "media",
+      "multiple": false
+    }
+  }
+}

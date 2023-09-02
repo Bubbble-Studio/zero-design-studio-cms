@@ -1,0 +1,28 @@
+{
+  "kind": "singleType",
+  "collectionName": "home_partners",
+  "info": {
+    "singularName": "home-partner",
+    "pluralName": "home-partners",
+    "displayName": "Home-Partner"
+  },
+  "options": {
+    "draftAndPublish": true
+  },
+  "pluginOptions": {},
+  "attributes": {
+    "Title": {
+      "type": "string"
+    },
+    "Logos": {
+      "allowedTypes": [
+        "images",
+        "files",
+        "videos",
+        "audios"
+      ],
+      "type": "media",
+      "multiple": true
+    }
+  }
+}

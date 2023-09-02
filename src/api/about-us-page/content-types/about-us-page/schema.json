@@ -1,0 +1,42 @@
+{
+  "kind": "singleType",
+  "collectionName": "about_us_pages",
+  "info": {
+    "singularName": "about-us-page",
+    "pluralName": "about-us-pages",
+    "displayName": "About Us Page"
+  },
+  "options": {
+    "draftAndPublish": true
+  },
+  "pluginOptions": {},
+  "attributes": {
+    "Page_Title": {
+      "type": "string"
+    },
+    "Page_Description": {
+      "type": "text"
+    },
+    "About_Title": {
+      "type": "string"
+    },
+    "About_Description": {
+      "type": "text"
+    },
+    "Image": {
+      "allowedTypes": [
+        "images",
+        "files",
+        "videos",
+        "audios"
+      ],
+      "type": "media",
+      "multiple": false
+    },
+    "Team_Members": {
+      "type": "relation",
+      "relation": "oneToMany",
+      "target": "api::team-member.team-member"
+    }
+  }
+}

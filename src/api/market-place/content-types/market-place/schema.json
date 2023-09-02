@@ -1,0 +1,33 @@
+{
+  "kind": "singleType",
+  "collectionName": "market_places",
+  "info": {
+    "singularName": "market-place",
+    "pluralName": "market-places",
+    "displayName": "MarketPlace",
+    "description": ""
+  },
+  "options": {
+    "draftAndPublish": true
+  },
+  "pluginOptions": {},
+  "attributes": {
+    "Title": {
+      "type": "string"
+    },
+    "Description": {
+      "type": "text"
+    },
+    "ContentTitle": {
+      "type": "string"
+    },
+    "ContentDescription": {
+      "type": "text"
+    },
+    "market_place_items": {
+      "type": "relation",
+      "relation": "oneToMany",
+      "target": "api::market-place-item.market-place-item"
+    }
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "kind": "singleType",
+  "collectionName": "home_contacts",
+  "info": {
+    "singularName": "home-contact",
+    "pluralName": "home-contacts",
+    "displayName": "Home-Contact"
+  },
+  "options": {
+    "draftAndPublish": true
+  },
+  "pluginOptions": {},
+  "attributes": {
+    "Contact_Form": {
+      "type": "component",
+      "repeatable": false,
+      "component": "util.form"
+    }
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "kind": "singleType",
+  "collectionName": "work_pages",
+  "info": {
+    "singularName": "work-page",
+    "pluralName": "work-pages",
+    "displayName": "Work Page",
+    "description": ""
+  },
+  "options": {
+    "draftAndPublish": true
+  },
+  "pluginOptions": {},
+  "attributes": {
+    "Page_Title": {
+      "type": "string"
+    },
+    "Page_Description": {
+      "type": "text"
+    },
+    "Work_Categories": {
+      "type": "relation",
+      "relation": "oneToMany",
+      "target": "api::category.category"
+    }
+  }
+}
