@@ -1,0 +1,21 @@
+{
+  "collectionName": "components_home_services",
+  "info": {
+    "displayName": "Service",
+    "icon": "restaurant"
+  },
+  "options": {},
+  "attributes": {
+    "CTA_Text": {
+      "type": "string"
+    },
+    "CTA_Link": {
+      "type": "string"
+    },
+    "services": {
+      "type": "relation",
+      "relation": "oneToMany",
+      "target": "api::service.service"
+    }
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "collectionName": "components_home_abouts",
+  "info": {
+    "displayName": "About",
+    "icon": "archive"
+  },
+  "options": {},
+  "attributes": {
+    "Title": {
+      "type": "string"
+    },
+    "Description": {
+      "type": "text"
+    },
+    "Image": {
+      "allowedTypes": [
+        "images",
+        "files",
+        "videos",
+        "audios"
+      ],
+      "type": "media",
+      "multiple": false
+    },
+    "CTAText": {
+      "type": "string"
+    },
+    "CTALink": {
+      "type": "string"
+    }
+  }
+}

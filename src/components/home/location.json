@@ -1,0 +1,21 @@
+{
+  "collectionName": "components_home_locations",
+  "info": {
+    "displayName": "Location",
+    "icon": "pinMap"
+  },
+  "options": {},
+  "attributes": {
+    "Title": {
+      "type": "string"
+    },
+    "locations": {
+      "type": "relation",
+      "relation": "oneToMany",
+      "target": "api::location.location"
+    },
+    "Description": {
+      "type": "text"
+    }
+  }
+}

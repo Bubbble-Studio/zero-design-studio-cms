@@ -1,0 +1,38 @@
+{
+  "collectionName": "components_home_market_places",
+  "info": {
+    "displayName": "MarketPlace",
+    "icon": "shoppingCart"
+  },
+  "options": {},
+  "attributes": {
+    "Title": {
+      "type": "string"
+    },
+    "Description": {
+      "type": "text"
+    },
+    "CTA_Link": {
+      "type": "string"
+    },
+    "CTA_Text": {
+      "type": "string"
+    },
+    "Images": {
+      "allowedTypes": [
+        "images",
+        "files",
+        "videos",
+        "audios"
+      ],
+      "type": "media",
+      "multiple": true
+    },
+    "Contact_CTA_text": {
+      "type": "string"
+    },
+    "Contact_CTA_Link": {
+      "type": "string"
+    }
+  }
+}

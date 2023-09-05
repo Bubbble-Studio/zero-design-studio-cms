@@ -1,0 +1,28 @@
+{
+  "collectionName": "components_home_second_sections",
+  "info": {
+    "displayName": "SecondSection"
+  },
+  "options": {},
+  "attributes": {
+    "Text": {
+      "type": "string"
+    },
+    "CTA_Text": {
+      "type": "string"
+    },
+    "CTA_Link": {
+      "type": "string"
+    },
+    "Image": {
+      "allowedTypes": [
+        "images",
+        "files",
+        "videos",
+        "audios"
+      ],
+      "type": "media",
+      "multiple": false
+    }
+  }
+}
