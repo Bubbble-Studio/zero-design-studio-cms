@@ -4,18 +4,14 @@
   "info": {
     "singularName": "home",
     "pluralName": "homes",
-    "displayName": "Home"
+    "displayName": "Home",
+    "description": ""
   },
   "options": {
     "draftAndPublish": true
   },
   "pluginOptions": {},
   "attributes": {
-    "About": {
-      "type": "component",
-      "repeatable": false,
-      "component": "home.about"
-    },
     "Hero": {
       "type": "component",
       "repeatable": false,
@@ -31,15 +27,10 @@
       "repeatable": false,
       "component": "home.market-place"
     },
-    "Partner": {
+    "Brands": {
       "type": "component",
       "repeatable": false,
       "component": "home.partner"
-    },
-    "SecondSection": {
-      "type": "component",
-      "repeatable": false,
-      "component": "home.second-section"
     },
     "Service": {
       "type": "component",
@@ -50,6 +41,11 @@
       "type": "component",
       "repeatable": false,
       "component": "util.form"
+    },
+    "works": {
+      "type": "relation",
+      "relation": "oneToMany",
+      "target": "api::work.work"
     }
   }
 }
