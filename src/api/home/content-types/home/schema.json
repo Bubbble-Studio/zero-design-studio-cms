@@ -42,10 +42,11 @@
       "repeatable": false,
       "component": "util.form"
     },
-    "works": {
-      "type": "relation",
-      "relation": "oneToMany",
-      "target": "api::work.work"
+    "Works": {
+      "displayName": "Works",
+      "type": "component",
+      "repeatable": false,
+      "component": "home.works"
     }
   }
 }

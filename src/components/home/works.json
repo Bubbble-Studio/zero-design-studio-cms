@@ -1,0 +1,15 @@
+{
+  "collectionName": "components_home_works",
+  "info": {
+    "displayName": "Works",
+    "icon": "briefcase"
+  },
+  "options": {},
+  "attributes": {
+    "works": {
+      "type": "relation",
+      "relation": "oneToMany",
+      "target": "api::work.work"
+    }
+  }
+}
