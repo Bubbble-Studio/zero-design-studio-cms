@@ -12,10 +12,10 @@
   },
   "pluginOptions": {},
   "attributes": {
-    "Title": {
+    "Page_Title": {
       "type": "string"
     },
-    "Description": {
+    "Page_Description": {
       "type": "text"
     },
     "Form": {
