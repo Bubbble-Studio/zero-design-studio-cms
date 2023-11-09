@@ -11,6 +11,9 @@
       "type": "relation",
       "relation": "oneToMany",
       "target": "api::brand.brand"
+    },
+    "title": {
+      "type": "string"
     }
   }
 }

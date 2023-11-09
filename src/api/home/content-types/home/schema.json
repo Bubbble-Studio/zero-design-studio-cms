@@ -17,11 +17,6 @@
       "repeatable": false,
       "component": "home.hero"
     },
-    "Location": {
-      "type": "component",
-      "repeatable": false,
-      "component": "home.location"
-    },
     "MarketPlace": {
       "type": "component",
       "repeatable": false,

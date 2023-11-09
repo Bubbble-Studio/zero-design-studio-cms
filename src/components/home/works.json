@@ -2,7 +2,8 @@
   "collectionName": "components_home_works",
   "info": {
     "displayName": "Works",
-    "icon": "briefcase"
+    "icon": "briefcase",
+    "description": ""
   },
   "options": {},
   "attributes": {
@@ -10,6 +11,9 @@
       "type": "relation",
       "relation": "oneToMany",
       "target": "api::work.work"
+    },
+    "title": {
+      "type": "string"
     }
   }
 }
