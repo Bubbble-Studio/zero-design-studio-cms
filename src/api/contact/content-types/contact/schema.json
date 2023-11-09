@@ -22,6 +22,9 @@
       "type": "component",
       "repeatable": false,
       "component": "util.form"
+    },
+    "description": {
+      "type": "string"
     }
   }
 }
