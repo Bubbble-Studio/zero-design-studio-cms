@@ -4,7 +4,8 @@
   "info": {
     "singularName": "market-place-item",
     "pluralName": "market-place-items",
-    "displayName": "Market Place Item"
+    "displayName": "Market Place Item",
+    "description": ""
   },
   "options": {
     "draftAndPublish": true
@@ -24,24 +25,32 @@
       "type": "string"
     },
     "Video": {
+      "type": "media",
+      "multiple": false,
+      "required": false,
       "allowedTypes": [
         "images",
         "files",
         "videos",
         "audios"
-      ],
-      "type": "media",
-      "multiple": false
+      ]
     },
     "Thumbnail": {
+      "type": "media",
+      "multiple": false,
+      "required": false,
       "allowedTypes": [
         "images",
         "files",
         "videos",
         "audios"
-      ],
-      "type": "media",
-      "multiple": false
+      ]
+    },
+    "market_place_item_categories": {
+      "type": "relation",
+      "relation": "oneToMany",
+      "target": "api::market-place-item-category.market-place-item-category",
+      "mappedBy": "market_place_item"
     }
   }
 }
