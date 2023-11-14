@@ -12,18 +12,6 @@
   },
   "pluginOptions": {},
   "attributes": {
-    "Page_Title": {
-      "type": "string"
-    },
-    "Page_Description": {
-      "type": "text"
-    },
-    "Work_Title": {
-      "type": "string"
-    },
-    "Work_Description": {
-      "type": "text"
-    },
     "Video": {
       "type": "media",
       "multiple": false,
@@ -35,16 +23,36 @@
         "audios"
       ]
     },
-    "Images": {
-      "type": "component",
-      "repeatable": true,
-      "component": "util.image"
-    },
     "category": {
       "type": "relation",
       "relation": "manyToOne",
       "target": "api::category.category",
       "inversedBy": "Works"
+    },
+    "Description": {
+      "type": "customField",
+      "options": {
+        "output": "HTML",
+        "preset": "rich"
+      },
+      "customField": "plugin::ckeditor.CKEditor"
+    },
+    "Title": {
+      "type": "string"
+    },
+    "slug": {
+      "type": "uid",
+      "targetField": "Title"
+    },
+    "Video_Thumbnail": {
+      "allowedTypes": [
+        "images",
+        "files",
+        "videos",
+        "audios"
+      ],
+      "type": "media",
+      "multiple": false
     }
   }
 }

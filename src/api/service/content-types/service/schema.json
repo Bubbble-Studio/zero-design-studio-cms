@@ -40,12 +40,17 @@
     "ShortDescriptionPoints": {
       "type": "text"
     },
-    "LongDescription": {
-      "type": "richtext"
-    },
     "slug": {
       "type": "uid",
       "targetField": "Title"
+    },
+    "LongDescription": {
+      "type": "customField",
+      "options": {
+        "output": "HTML",
+        "preset": "rich"
+      },
+      "customField": "plugin::ckeditor.CKEditor"
     }
   }
 }
