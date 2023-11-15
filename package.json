@@ -16,7 +16,8 @@
     "@strapi/provider-email-sendgrid": "^4.15.4",
     "@strapi/provider-upload-cloudinary": "^4.15.4",
     "@strapi/strapi": "4.13.1",
-    "pg": "8.8.0"
+    "pg": "8.8.0",
+    "strapi-plugin-rest-cache": "^4.2.8"
   },
   "author": {
     "name": "A Strapi developer"
