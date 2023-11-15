@@ -13,6 +13,7 @@
     "@ckeditor/strapi-plugin-ckeditor": "^0.0.10",
     "@strapi/plugin-i18n": "4.13.1",
     "@strapi/plugin-users-permissions": "4.13.1",
+    "@strapi/provider-email-sendgrid": "^4.15.4",
     "@strapi/provider-upload-cloudinary": "^4.15.4",
     "@strapi/strapi": "4.13.1",
     "pg": "8.8.0"
