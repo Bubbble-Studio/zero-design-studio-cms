@@ -4,7 +4,8 @@
   "info": {
     "singularName": "about-us-page",
     "pluralName": "about-us-pages",
-    "displayName": "About Us Page"
+    "displayName": "About Us Page",
+    "description": ""
   },
   "options": {
     "draftAndPublish": true
@@ -24,6 +25,22 @@
       "type": "text"
     },
     "Image": {
+      "type": "media",
+      "multiple": false,
+      "required": false,
+      "allowedTypes": [
+        "images",
+        "files",
+        "videos",
+        "audios"
+      ]
+    },
+    "Team_Members": {
+      "type": "relation",
+      "relation": "oneToMany",
+      "target": "api::team-member.team-member"
+    },
+    "bgImage": {
       "allowedTypes": [
         "images",
         "files",
@@ -32,11 +49,6 @@
       ],
       "type": "media",
       "multiple": false
-    },
-    "Team_Members": {
-      "type": "relation",
-      "relation": "oneToMany",
-      "target": "api::team-member.team-member"
     }
   }
 }
