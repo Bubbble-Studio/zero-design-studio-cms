@@ -26,4 +26,21 @@ export default ({ env }) => ({
       },
     },
   },
+  ezforms: {
+    config: {
+      captchaProvider: {
+        name: "none",
+      },
+      notificationProviders: [
+        {
+          name: "email",
+          enabled: true,
+          config: {
+            subject: "New Contact Form Submission on Website", // Optional
+            from: env("SENDGRID_DEFAULT_FROM"), // Required
+          },
+        },
+      ],
+    },
+  },
 });

@@ -17,6 +17,7 @@
     "@strapi/provider-upload-cloudinary": "^4.15.4",
     "@strapi/strapi": "4.13.1",
     "pg": "8.8.0",
+    "strapi-plugin-ezforms": "^0.1.6",
     "strapi-plugin-rest-cache": "^4.2.8"
   },
   "author": {
