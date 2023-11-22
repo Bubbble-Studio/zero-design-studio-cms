@@ -52,13 +52,8 @@
       },
       "customField": "plugin::ckeditor.CKEditor"
     },
-    "MainVideo": {
-      "allowedTypes": [
-        "videos"
-      ],
-      "type": "media",
-      "multiple": false,
-      "required": true
+    "mainVideoLink": {
+      "type": "string"
     }
   }
 }
