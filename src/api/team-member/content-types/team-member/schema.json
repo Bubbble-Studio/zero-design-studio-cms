@@ -4,7 +4,8 @@
   "info": {
     "singularName": "team-member",
     "pluralName": "team-members",
-    "displayName": "Team Member"
+    "displayName": "Team Member",
+    "description": ""
   },
   "options": {
     "draftAndPublish": true
@@ -18,22 +19,21 @@
       "type": "string"
     },
     "Image": {
+      "type": "media",
+      "multiple": false,
+      "required": false,
       "allowedTypes": [
         "images",
         "files",
         "videos",
         "audios"
-      ],
-      "type": "media",
-      "multiple": false
+      ]
     },
     "Good_At": {
       "type": "string"
     },
-    "Socials": {
-      "type": "relation",
-      "relation": "oneToMany",
-      "target": "api::social.social"
+    "LinkedIn": {
+      "type": "string"
     }
   }
 }
