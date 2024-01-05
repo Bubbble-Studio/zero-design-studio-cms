@@ -12,11 +12,7 @@
   },
   "pluginOptions": {},
   "attributes": {
-    "Page_Title": {
-      "type": "string",
-      "required": true
-    },
-    "Page_Description": {
+    "Title": {
       "type": "string",
       "required": true
     },
@@ -44,12 +40,17 @@
       "mappedBy": "blogs"
     },
     "thumbnail": {
-      "allowedTypes": [
-        "images"
-      ],
       "type": "media",
       "multiple": false,
-      "required": true
+      "required": true,
+      "allowedTypes": [
+        "images"
+      ]
+    },
+    "seo": {
+      "type": "component",
+      "repeatable": false,
+      "component": "shared.seo"
     }
   }
 }
