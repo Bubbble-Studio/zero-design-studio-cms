@@ -4,7 +4,8 @@
   "info": {
     "singularName": "category",
     "pluralName": "categories",
-    "displayName": "Work Category"
+    "displayName": "Work Category",
+    "description": ""
   },
   "options": {
     "draftAndPublish": true
@@ -23,9 +24,9 @@
       "target": "api::work.work",
       "mappedBy": "category"
     },
-    "blog": {
+    "blogs": {
       "type": "relation",
-      "relation": "manyToOne",
+      "relation": "manyToMany",
       "target": "api::blog.blog",
       "inversedBy": "Work_Categories"
     }

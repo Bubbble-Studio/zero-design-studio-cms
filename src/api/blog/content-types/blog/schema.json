@@ -39,9 +39,9 @@
     },
     "Work_Categories": {
       "type": "relation",
-      "relation": "oneToMany",
+      "relation": "manyToMany",
       "target": "api::category.category",
-      "mappedBy": "blog"
+      "mappedBy": "blogs"
     }
   }
 }
