@@ -1,0 +1,14 @@
+{
+  "collectionName": "components_util_extra_scripts",
+  "info": {
+    "displayName": "extraScript",
+    "icon": "chartPie"
+  },
+  "options": {},
+  "attributes": {
+    "script": {
+      "type": "text",
+      "required": true
+    }
+  }
+}
