@@ -56,6 +56,16 @@
       "type": "uid",
       "targetField": "Title",
       "required": true
+    },
+    "Bg_Image_File": {
+      "type": "component",
+      "repeatable": false,
+      "component": "util.image"
+    },
+    "Thumbnail_Image_File": {
+      "type": "component",
+      "repeatable": false,
+      "component": "util.image"
     }
   }
 }

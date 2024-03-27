@@ -51,6 +51,11 @@
       "relation": "oneToMany",
       "target": "api::market-place-item-category.market-place-item-category",
       "mappedBy": "market_place_item"
+    },
+    "Thumbnail_Image_File": {
+      "type": "component",
+      "repeatable": false,
+      "component": "util.image"
     }
   }
 }

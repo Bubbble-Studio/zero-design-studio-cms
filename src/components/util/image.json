@@ -2,11 +2,29 @@
   "collectionName": "components_util_images",
   "info": {
     "displayName": "Image",
-    "icon": "picture"
+    "icon": "picture",
+    "description": ""
   },
   "options": {},
   "attributes": {
     "Image": {
+      "type": "media",
+      "multiple": false,
+      "required": false,
+      "allowedTypes": [
+        "images",
+        "files",
+        "videos",
+        "audios"
+      ]
+    },
+    "Title": {
+      "type": "string"
+    },
+    "Description": {
+      "type": "text"
+    },
+    "mobileImage": {
       "allowedTypes": [
         "images",
         "files",
@@ -15,12 +33,6 @@
       ],
       "type": "media",
       "multiple": false
-    },
-    "Title": {
-      "type": "string"
-    },
-    "Description": {
-      "type": "text"
     }
   }
 }

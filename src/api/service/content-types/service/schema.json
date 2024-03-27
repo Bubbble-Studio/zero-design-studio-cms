@@ -61,14 +61,25 @@
       "component": "shared.seo"
     },
     "bgImage": {
+      "type": "media",
+      "multiple": false,
+      "required": false,
       "allowedTypes": [
         "images",
         "files",
         "videos",
         "audios"
-      ],
-      "type": "media",
-      "multiple": false
+      ]
+    },
+    "Icon_File": {
+      "type": "component",
+      "repeatable": false,
+      "component": "util.image"
+    },
+    "Thumbnail_File": {
+      "type": "component",
+      "repeatable": false,
+      "component": "util.image"
     }
   }
 }
