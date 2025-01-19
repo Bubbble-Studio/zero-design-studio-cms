@@ -18,17 +18,17 @@
     "Description": {
       "type": "text"
     },
-    "Works": {
-      "type": "relation",
-      "relation": "oneToMany",
-      "target": "api::work.work",
-      "mappedBy": "category"
-    },
     "blogs": {
       "type": "relation",
       "relation": "manyToMany",
       "target": "api::blog.blog",
       "inversedBy": "Work_Categories"
+    },
+    "Works": {
+      "type": "relation",
+      "relation": "manyToMany",
+      "target": "api::work.work",
+      "mappedBy": "categories"
     }
   }
 }
