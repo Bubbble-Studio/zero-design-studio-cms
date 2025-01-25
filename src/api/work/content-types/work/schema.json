@@ -59,6 +59,11 @@
       "type": "component",
       "repeatable": false,
       "component": "util.image"
+    },
+    "order": {
+      "type": "integer",
+      "min": 1,
+      "default": 1000
     }
   }
 }
