@@ -64,6 +64,14 @@
       "type": "integer",
       "min": 1,
       "default": 1000
+    },
+    "location": {
+      "type": "enumeration",
+      "enum": [
+        "mumbai",
+        "new_delhi",
+        "dubai"
+      ]
     }
   }
 }
