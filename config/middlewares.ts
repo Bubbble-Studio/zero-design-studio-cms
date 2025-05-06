@@ -26,14 +26,7 @@ export default [
       },
     },
   },
-  {
-    name: "strapi::cors",
-    config: {
-      enabled: true,
-      headers: "*", // Allow all headers
-      origin: ["*"], // Allow all origins
-    },
-  },
+  "strapi::cors",
   "strapi::poweredBy",
   "strapi::logger",
   "strapi::query",
