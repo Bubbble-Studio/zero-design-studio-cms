@@ -1,0 +1,28 @@
+{
+  "kind": "singleType",
+  "collectionName": "anamorphic_pages",
+  "info": {
+    "singularName": "anamorphic-page",
+    "pluralName": "anamorphic-pages",
+    "displayName": "Anamorphic Page"
+  },
+  "options": {
+    "draftAndPublish": true
+  },
+  "pluginOptions": {},
+  "attributes": {
+    "seo": {
+      "type": "component",
+      "repeatable": false,
+      "component": "shared.seo"
+    },
+    "description": {
+      "type": "customField",
+      "options": {
+        "output": "HTML",
+        "preset": "standard"
+      },
+      "customField": "plugin::ckeditor.CKEditor"
+    }
+  }
+}
