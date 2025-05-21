@@ -4,7 +4,8 @@
   "info": {
     "singularName": "anamorphic-wireframe-page",
     "pluralName": "anamorphic-wireframe-pages",
-    "displayName": "Anamorphic Wireframe Page"
+    "displayName": "Anamorphic Wireframe Page",
+    "description": ""
   },
   "options": {
     "draftAndPublish": true

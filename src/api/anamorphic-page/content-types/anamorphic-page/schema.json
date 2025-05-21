@@ -4,7 +4,8 @@
   "info": {
     "singularName": "anamorphic-page",
     "pluralName": "anamorphic-pages",
-    "displayName": "Anamorphic Page"
+    "displayName": "Anamorphic Page",
+    "description": ""
   },
   "options": {
     "draftAndPublish": true
@@ -20,7 +21,7 @@
       "type": "customField",
       "options": {
         "output": "HTML",
-        "preset": "standard"
+        "preset": "rich"
       },
       "customField": "plugin::ckeditor.CKEditor"
     }
