@@ -1,11 +1,10 @@
 {
   "kind": "collectionType",
-  "collectionName": "contents",
+  "collectionName": "solutions",
   "info": {
-    "singularName": "content",
-    "pluralName": "contents",
-    "displayName": "Content",
-    "description": ""
+    "singularName": "solution",
+    "pluralName": "solutions",
+    "displayName": "Solution"
   },
   "options": {
     "draftAndPublish": true
