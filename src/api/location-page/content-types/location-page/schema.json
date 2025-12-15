@@ -1,0 +1,47 @@
+{
+  "kind": "collectionType",
+  "collectionName": "location_pages",
+  "info": {
+    "singularName": "location-page",
+    "pluralName": "location-pages",
+    "displayName": "Location Page",
+    "description": "Location-specific pages like Dubai solutions"
+  },
+  "options": {
+    "draftAndPublish": true
+  },
+  "pluginOptions": {},
+  "attributes": {
+    "title": {
+      "type": "string",
+      "required": true
+    },
+    "slug": {
+      "type": "uid",
+      "targetField": "title",
+      "required": true
+    },
+    "location": {
+      "type": "string",
+      "required": true
+    },
+    "seo": {
+      "type": "component",
+      "repeatable": false,
+      "component": "shared.seo"
+    },
+    "description": {
+      "type": "customField",
+      "options": {
+        "output": "HTML",
+        "preset": "rich"
+      },
+      "customField": "plugin::ckeditor.CKEditor"
+    },
+    "faq": {
+      "type": "component",
+      "repeatable": false,
+      "component": "sections.faq"
+    }
+  }
+}
