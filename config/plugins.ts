@@ -16,13 +16,15 @@ export default ({ env }) => ({
   },
   email: {
     config: {
-      provider: "sendgrid",
+      provider: "cloudflare",
       providerOptions: {
-        apiKey: env("SENDGRID_API_KEY"),
+        accountId: env("CLOUDFLARE_ACCOUNT_ID"),
+        apiToken: env("CLOUDFLARE_EMAIL_API_TOKEN"),
+        apiBaseUrl: env("CLOUDFLARE_API_BASE_URL", "https://api.cloudflare.com/client/v4"),
       },
       settings: {
-        defaultFrom: env("SENDGRID_DEFAULT_FROM"),
-        defaultReplyTo: env("SENDGRID_DEFAULT_REPLY_TO"),
+        defaultFrom: env("CLOUDFLARE_EMAIL_DEFAULT_FROM", "forms@mail.zerodesignstudios.com"),
+        defaultReplyTo: env("CLOUDFLARE_EMAIL_DEFAULT_REPLY_TO", "info@zerodesignstudios.com"),
       },
     },
   },
@@ -37,7 +39,10 @@ export default ({ env }) => ({
           enabled: true,
           config: {
             subject: "New Contact Form Submission on Website", // Optional
-            from: env("SENDGRID_DEFAULT_FROM"), // Required
+            from: env(
+              "CLOUDFLARE_EMAIL_DEFAULT_FROM",
+              "forms@mail.zerodesignstudios.com"
+            ), // Required
           },
         },
       ],

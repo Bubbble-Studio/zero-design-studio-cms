@@ -14,7 +14,7 @@
     "@strapi/plugin-i18n": "4.13.1",
     "@strapi/plugin-seo": "^1.9.8",
     "@strapi/plugin-users-permissions": "4.13.1",
-    "@strapi/provider-email-sendgrid": "^4.15.4",
+    "@strapi/provider-email-cloudflare": "file:providers/strapi-provider-email-cloudflare",
     "@strapi/provider-upload-cloudinary": "^4.15.4",
     "@strapi/strapi": "4.13.1",
     "pg": "8.8.0",

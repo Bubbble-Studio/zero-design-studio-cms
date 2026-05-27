@@ -32,6 +32,18 @@ npm run build
 yarn build
 ```
 
+## Email notifications
+
+EZForms sends contact form notifications through Strapi's email plugin. This project uses
+Cloudflare Email Service through a local Strapi email provider.
+
+Required environment variables:
+
+- `CLOUDFLARE_ACCOUNT_ID`
+- `CLOUDFLARE_EMAIL_API_TOKEN`
+- `CLOUDFLARE_EMAIL_DEFAULT_FROM` such as `forms@mail.zerodesignstudios.com`
+- `CLOUDFLARE_EMAIL_DEFAULT_REPLY_TO` such as `info@zerodesignstudios.com`
+
 ## ⚙️ Deployment
 
 Strapi gives you many possible deployment options for your project including [Strapi Cloud](https://cloud.strapi.io). Browse the [deployment section of the documentation](https://docs.strapi.io/dev-docs/deployment) to find the best solution for your use case.
