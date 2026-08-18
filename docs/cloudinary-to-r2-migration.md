@@ -11,21 +11,40 @@
 
 ---
 
-## Why this is low-risk
+## Risk assessment (revised after review)
 
-Two things were verified before writing this plan:
+Three reviewers checked this plan against the repos and a database dump. One premise in the
+first draft was **wrong** and is corrected here.
 
-1. **No Cloudinary transformations are in use.** Sampled asset URLs contain no `w_`, `c_`,
-   `q_`, `f_` or `dpr_` transform segments — they are plain `/image/upload/v<version>/<file>`
-   URLs. This matters enormously: if the site relied on Cloudinary's on-the-fly resizing,
-   plain R2 could not replace it (R2 is object storage with no image pipeline) and we would
-   need Cloudflare Images instead. Because it does not, **R2 is a drop-in replacement**.
-   *Re-confirm this across all content types before Phase 2 — see Step 0.3.*
-2. **A working R2 setup already exists in the org.** `zero-store/strapi` runs the same
-   pattern in production, so the provider config and env var names below are copied from a
-   known-good deployment rather than invented.
+### ✅ Images are safe — a plain R2 swap works
+Of **1,383 distinct Cloudinary URLs** in the database dump, all but four are plain
+`/upload/v<version>/<file>` with no transformation segments. For images, R2 is a drop-in.
 
----
+### ❌ Video preview GIFs DO use Cloudinary transformations — and R2 cannot replace them
+Four `files` rows (all videos) have a `preview_url` built by Cloudinary's video→animated-GIF
+pipeline:
+```
+res.cloudinary.com/dccjqha6a/video/upload/c_scale,dl_200,vs_6,w_250/<name>.gif
+```
+`c_scale` + `w_250` resize, `vs_6` samples frames, `dl_200` sets frame delay. **Neither R2 nor
+Cloudflare Images can generate an animated GIF from an MP4** — Cloudflare Images transforms
+still images only. Escalating to Cloudflare Images does *not* solve this.
+
+These are load-bearing, not dead data. `zds-client` renders them as a CSS background:
+`src/routes/services/[slug]/+page.svelte:50` (`MainVideo.data.attributes.previewUrl`) and `:80`.
+
+**Required work:** pre-generate the four GIFs once with `ffmpeg` and upload them to R2 as static
+objects, then point `preview_url` at them. Roughly:
+```bash
+ffmpeg -i <source>.mp4 -vf "fps=5,scale=250:-1:flags=lanczos" -loop 0 <name>.gif
+```
+Match the visual result of `vs_6,dl_200,w_250` before/after. Any *new* video uploaded after the
+migration will have **no** `preview_url` — the R2 provider does not generate one. Decide whether
+that is acceptable or whether a Strapi lifecycle hook should generate previews on upload.
+
+### ✅ A proven R2 setup exists in the org
+`zero-store/strapi` runs R2 in production — but see the provider warning in Phase 1: it is
+**Strapi 5**, and its provider package does not support Strapi 4.
 
 ## Target architecture
 
@@ -39,9 +58,11 @@ Two things were verified before writing this plan:
 does not recommend it for production traffic. A custom domain also means the URLs stored in
 the database stay valid if the bucket ever moves.
 
-> The store's existing bucket is currently served from
-> `pub-a1e5741b07604a7694d0150710543b46.r2.dev`. Worth moving it behind a custom domain too,
-> as a separate task.
+> The store's production bucket is served from `pub-a1e5741b07604a7694d0150710543b46.r2.dev`
+> (verified against the live API). Note that `zero-store/strapi/.env` points at a *different*
+> bucket (`zero-test`, `pub-9d14fac3aaa94d08baf1ecd26505af0a.r2.dev`) — local dev and prod
+> differ, so don't assume the local `.env` reflects production. Moving the production bucket
+> behind a custom domain is worth doing as a separate task.
 
 ---
 
@@ -75,18 +96,40 @@ curl -s "$API/<collection>?populate=*&pagination[pageSize]=100" \
 Stops the bleeding immediately. Existing assets keep serving from Cloudinary, so this is
 independently deployable and reversible.
 
-### 1.1 Dependencies
+### 1.1 Dependencies — provider choice is RESOLVED
+
+**Do not use `strapi-provider-cloudflare-r2-aws`** (the package the store uses). Every published
+version declares `peerDependencies: { "@strapi/strapi": ">=5.0.0" }`, so it will not install
+against Strapi 4.13.1. Use its Strapi-4-compatible sibling:
+
 ```bash
-npm uninstall @strapi/provider-upload-cloudinary
-npm install strapi-provider-cloudflare-r2-aws   # ⚠ see compatibility note
+npm install strapi-provider-cloudflare-r2@0.3.0
+# keep @strapi/provider-upload-cloudinary installed until Phase 4 — see rollback
 ```
 
-> **⚠ Compatibility must be checked.** This repo is Strapi **4.13.1**, while the store runs
-> Strapi 5. Confirm the installed provider version supports Strapi 4 (check its peer
-> dependencies). If it does not, use the official **`@strapi/provider-upload-aws-s3@^4`**
-> against R2's S3-compatible endpoint instead — R2 speaks the S3 API, so it works, but the
-> config keys differ (`region: 'auto'`, plus a `baseUrl`/public-URL setting so stored URLs
-> point at the custom domain rather than the S3 endpoint). Verify on a staging instance.
+> **Fallback, if needed:** `@strapi/provider-upload-aws-s3@^4` also works against R2, but **not
+> out of the box** — it sends `ACL: 'public-read'` on every PutObject and **R2 does not implement
+> S3 ACLs**, so uploads fail with `NotImplemented`. You must pass `ACL: null` explicitly
+> (`undefined` or omitting it does *not* work — the provider defaults it back to `public-read`;
+> and `ACL: 'private'` makes Strapi sign URLs, defeating the public CDN). Full shape:
+> ```ts
+> providerOptions: {
+>   baseUrl: 'https://cdn.zerodesignstudios.com',  // no trailing slash
+>   s3Options: {
+>     credentials: { accessKeyId, secretAccessKey },
+>     region: 'auto',
+>     endpoint: 'https://<account-id>.r2.cloudflarestorage.com',
+>     forcePathStyle: true,
+>     params: { Bucket, ACL: null },
+>   },
+> }
+> ```
+> Note `rootPath` is a key prefix, not a URL — it is not a substitute for `baseUrl`.
+
+**`pool: false` is mandatory** with `strapi-provider-cloudflare-r2`: its `delete()` always uses
+the folderPath-prefixed key, so `pool: true` would make deletions silently no-op and orphan
+objects. (In the store's `-aws` package `pool` is ignored entirely — another reason that config
+does not transfer verbatim.)
 
 ### 1.2 `config/plugins.ts`
 Replace the `upload` block (leave `email`, `ezforms`, `seo` untouched):
@@ -142,8 +185,40 @@ Run against a **restored copy** of the database first. Never point the first run
 For each row in the `files` table:
 1. Download the current Cloudinary URL.
 2. Upload to R2 under the same path/filename.
-3. Rewrite `url`, **every entry in `formats`** (`thumbnail`, `small`, `medium`, `large` —
-   each has its own `url`), `provider`, and `provider_metadata`.
+3. Rewrite, per row:
+   - `url`
+   - **every entry in `formats`** (`thumbnail`, `small`, `medium`, `large`) — each has its own
+     `url` *and* its own `provider_metadata`
+   - **`preview_url`** — ⚠️ omitted from the first draft. Only the 4 video rows use it, and they
+     need the pre-generated GIFs (see Risk assessment). `SELECT count(*) FROM files WHERE
+     preview_url IS NOT NULL` to confirm the set before and after.
+   - `provider_metadata` → set to **NULL** (Cloudinary stores `{public_id, resource_type}`;
+     neither R2 provider writes this field)
+   - `provider` → the exact string the new provider writes for new uploads. Verify it against a
+     Phase 1 test upload so you don't end up with two different values in one table.
+
+   **Do NOT touch `hash`, `ext`, or `mime`.** The provider recomputes the R2 object key from
+   `hash`+`ext` on every read *and delete* — "normalising" them orphans objects permanently.
+
+**Object keys must match what the provider generates for new uploads**, or the Media Library's
+delete button will silently no-op. With `strapi-provider-cloudflare-r2` + `pool: false` the
+parent file key is `<folderPath sans leading slash>/<hash><ext>` while format variants live at
+`<hash><ext>` in the bucket root — the asymmetry is real and must be reproduced. Write the
+key-derivation rule down explicitly, and run a **pre-flight collision report** across all rows
+and all format variants; **abort on any collision** rather than resolving it at runtime.
+
+**Set `ContentType` from the row's `mime` on every upload** (parent and every variant). R2
+defaults to `application/octet-stream`, which makes browsers download files instead of rendering
+them and causes social scrapers to reject OG images. Also set
+`CacheControl: public, max-age=31536000, immutable`.
+
+**Order per row: download → verify bytes → upload → HEAD-verify in R2 → only then rewrite the
+row**, committed per row. A failed download must never result in a rewritten URL. Log every row
+to a state ledger (`pending/uploaded/verified/rewritten/failed` + checksum) — this doubles as the
+row-level rollback record.
+
+**Throttle:** bounded concurrency (5–8) with exponential backoff, downloading from the delivery
+host (`res.cloudinary.com`), not the Admin API, which is hard rate-limited.
 
 **The `formats` column is the classic thing to miss.** Strapi stores responsive variants as
 JSON; rewriting only the top-level `url` leaves thumbnails silently pointing at Cloudinary,
@@ -160,8 +235,12 @@ have a **dry-run mode** that reports what it would change without writing.
 
 Cloudinary URLs also live outside the `files` table:
 
-- **Rich text / markdown body fields** — editors paste image URLs inline. Search every
-  long-text column for `res.cloudinary.com` and rewrite.
+- **Rich text / markdown body fields** — editors paste image URLs inline. Confirmed in the dump:
+  **`works` (117 occurrences)** and **`blogs` (6)**, all plain URLs. Enumerate columns
+  programmatically from `information_schema` rather than by hand, and remember Strapi 4 keeps
+  **draft *and* published copies**, **`components_*` tables** (e.g. `components_elements_faq_items`)
+  and **i18n locale copies** — all of which need the same sweep, using the *same* key map as
+  Phase 2.
 - **Hardcoded in the frontend** — confirmed: `zds-client`
   `src/lib/components/BubbleTeamLayout.svelte:94` pins the ZDS logo to
   `https://res.cloudinary.com/dccjqha6a/image/upload/v1701106728/zds_logo_ef2db07d5b.png`.
@@ -172,13 +251,27 @@ Cloudinary URLs also live outside the `files` table:
 
 ## Phase 4 — Verify and cut over
 
-1. Crawl the live site for `res.cloudinary.com` — **expect zero hits**:
-```bash
-# spot-check the API surface
-curl -s "$API/<collection>?populate=*&pagination[pageSize]=100" | grep -c "res.cloudinary.com"
+> ⚠️ **A "zero Cloudinary hits" check is not sufficient.** A script that rewrites every DB row
+> but fails every upload also produces zero hits — and a 100% broken site. You need *positive*
+> checks too.
+
+1. **Purge the CDN cache first.** `zds-client` has a zone-purge endpoint at
+   `src/routes/api/purge/+server.ts`; edge-cached HTML still contains the old URLs, so verifying
+   before purging both false-positives and leaves real users on dead links.
+2. **Negative check, against the DB** (authoritative — the REST API with `populate=*` only
+   populates one level and misses media inside components such as `shared/seo` `metaImage`):
+```sql
+SELECT count(*) FROM files
+WHERE url LIKE '%cloudinary%'
+   OR CAST(formats AS TEXT) LIKE '%cloudinary%'
+   OR preview_url LIKE '%cloudinary%';   -- expect 0
 ```
-2. Click through image-heavy pages (works, blogs, team) and confirm thumbnails *and*
-   full-size images load.
+3. **Positive check:** for every `url`, every `formats[*].url` and every `preview_url`, `HEAD`
+   returns **200** with a `Content-Type` matching the row's `mime`.
+4. **Three-way reconciliation:** Cloudinary asset count (Phase 0.1) vs R2 object count vs
+   distinct DB URLs. Explain any delta before proceeding.
+5. Click through image-heavy pages (works, blogs, team, services) and confirm thumbnails,
+   full-size images **and the four video preview GIFs** all render.
 3. Remove `res.cloudinary.com` from the CSP in `middlewares.ts`.
 4. Leave the Cloudinary account active for a **grace period (2–4 weeks)** in case something
    was missed, then downgrade/cancel.
@@ -190,12 +283,34 @@ curl -s "$API/<collection>?populate=*&pagination[pageSize]=100" | grep -c "res.c
 | Phase | Rollback |
 |---|---|
 | 1 | Revert the `plugins.ts` commit and redeploy. Assets uploaded to R2 in the meantime need re-pointing. |
-| 2 | Restore the DB backup. Cloudinary still holds every original, so nothing is lost. |
+| 2 | Replay the **row-level ledger** (original `url`/`formats`/`preview_url`/`provider_metadata` dumped before each rewrite). ⚠️ Restoring the whole DB backup instead would discard every content edit made since — on a live CMS that is a second incident, not a rollback. Cloudinary still holds every original. |
 | 4 | Do not cancel Cloudinary until the grace period passes. |
 
 ## Open items
 
-- [ ] Asset count + total GB (Phase 0.1)
-- [ ] Confirm provider package supports Strapi 4.13 (Phase 1.1)
-- [ ] Confirm zero transformation URLs across all collections (Phase 0.3)
+- [ ] Asset count + total GB, and **max asset size** (Phase 0.1)
+- [x] ~~Confirm provider supports Strapi 4.13~~ → resolved: use `strapi-provider-cloudflare-r2@0.3.0`
+- [x] ~~Confirm zero transformation URLs~~ → resolved: **4 video preview GIFs DO use transforms**
+- [ ] Pre-generate the 4 video preview GIFs with ffmpeg; decide the policy for future uploads
+- [ ] **Confirm the production database engine.** `config/database.ts` defaults to *sqlite* and
+      the runbook cannot specify backup/restore mechanics until this is known — this is the only
+      rollback path for Phase 2. Test the restore into a scratch DB.
+- [ ] Set bucket **CORS** (admin media preview, any `fetch`/canvas use)
+- [ ] Prove `cdn.zerodesignstudios.com` serves a test object **before** the Phase 1 deploy —
+      otherwise every post-deploy upload stores a URL that 404s, and those rows are not covered
+      by Phase 2
+- [ ] Announce an **editorial freeze** on media deletes/replaces between the Phase 1 deploy and
+      Phase 4 sign-off (Strapi calls the *configured* provider on delete, so deleting a
+      not-yet-migrated Cloudinary asset orphans it), plus a delta pass for rows with
+      `updated_at > migration_start`
+- [ ] Check Cloudinary **account-level auto-optimisation** (`f_auto`/`q_auto` defaults never
+      appear in the URL). If enabled, you are served WebP/AVIF today and R2 will serve original
+      JPEG/PNG — a real LCP regression. Mitigate with Cloudflare Polish on the `cdn.` hostname.
+- [ ] Accept the **SEO cost**: image URLs change, Google Images signals reset, and already-shared
+      `og:image` links break once Cloudinary is cancelled. Cloudinary offers no redirects, so
+      consider a grace period longer than 2–4 weeks.
+- [ ] **`zds-backup` (1.8 MB DB dump) is committed to this repo.** It contains 1,386 Cloudinary
+      URLs and full table data — review it for PII/secrets and consider removing it from version
+      control independently of this migration.
+- [ ] Regenerate `package-lock.json` on the Phase 1 dependency swap
 - [ ] Decide whether to move the store's bucket to a custom domain too
