@@ -33,18 +33,39 @@ still images only. Escalating to Cloudflare Images does *not* solve this.
 These are load-bearing, not dead data. `zds-client` renders them as a CSS background:
 `src/routes/services/[slug]/+page.svelte:50` (`MainVideo.data.attributes.previewUrl`) and `:80`.
 
-**Required work:** pre-generate the four GIFs once with `ffmpeg` and upload them to R2 as static
-objects, then point `preview_url` at them. Roughly:
-```bash
-ffmpeg -i <source>.mp4 -vf "fps=5,scale=250:-1:flags=lanczos" -loop 0 <name>.gif
-```
-Match the visual result of `vs_6,dl_200,w_250` before/after. Any *new* video uploaded after the
-migration will have **no** `preview_url` — the R2 provider does not generate one. Decide whether
-that is acceptable or whether a Strapi lifecycle hook should generate previews on upload.
+**Solved without ffmpeg.** The Cloudinary transform URL *renders and returns a real GIF*, so
+while the account is still live the migration simply downloads that rendered result and stores it
+as a static R2 object (`<hash>_preview.gif`). The script does this automatically. This only works
+**before** cancellation — it is a hard ordering constraint.
+
+Still true: any *new* video uploaded after the migration will have **no** `preview_url`, because
+the R2 provider does not generate one. Decide whether that is acceptable or whether a Strapi
+lifecycle hook should generate previews on upload.
 
 ### ✅ A proven R2 setup exists in the org
 `zero-store/strapi` runs R2 in production — but see the provider warning in Phase 1: it is
 **Strapi 5**, and its provider package does not support Strapi 4.
+
+## Confirmed inventory (measured, not estimated)
+
+Taken from the `zds-backup` pg_dump, so these are exact rather than guesses:
+
+| | |
+|---|---|
+| Rows in `files` | **307** (303 images, 4 videos) |
+| Format variants | **1,075** (thumbnail 299 · small 281 · medium 255 · large 240) |
+| Video preview GIFs | **4** |
+| **R2 objects to create** | **1,386** — validated as **1,386 unique keys, 0 collisions** |
+| Payload | ~170 MB (parent rows) |
+| Extensions | png 1,116 · jpg 142 · jpeg 120 · mp4 4 · gif 4 |
+
+**Cost: effectively $0/month.** R2's free tier covers 10 GB storage and egress is free.
+
+**Database is PostgreSQL** (confirmed from the dump — `config/database.ts` merely *defaults*
+to sqlite). Backup/restore is `pg_dump` / `pg_restore`.
+
+**`folder_path` is `/` for all 307 rows**, so every R2 key is flat `<hash><ext>` with no
+nesting — this removes the parent/variant key asymmetry the review warned about.
 
 ## Target architecture
 
@@ -224,8 +245,11 @@ host (`res.cloudinary.com`), not the Admin API, which is hard rate-limited.
 JSON; rewriting only the top-level `url` leaves thumbnails silently pointing at Cloudinary,
 which then break the day the account is cancelled.
 
-The script must be **idempotent** (safe to re-run — skip rows already on the CDN domain) and
-have a **dry-run mode** that reports what it would change without writing.
+**The script is written:** `scripts/migrate-cloudinary-to-r2.mjs`
+(`preflight` | `migrate` | `verify` | `rollback`; writes nothing without `--execute`).
+It is idempotent, resumable, bounded-concurrency, and ledgers every row before rewriting it.
+Its key-derivation logic was validated offline against all 307 rows from the dump:
+**1,386 objects → 1,386 unique keys, 0 collisions, 0 problem rows.**
 
 **Do not delete anything from Cloudinary in this phase.** It is the rollback.
 
@@ -274,7 +298,13 @@ WHERE url LIKE '%cloudinary%'
    full-size images **and the four video preview GIFs** all render.
 3. Remove `res.cloudinary.com` from the CSP in `middlewares.ts`.
 4. Leave the Cloudinary account active for a **grace period (2–4 weeks)** in case something
-   was missed, then downgrade/cancel.
+   was missed, then cancel.
+
+**Decision on old links: internal only.** Every URL stored in the database and in content is
+rewritten to R2, and Cloudinary is then **cancelled**. Cloudinary URLs previously shared
+externally (og:image on old social posts, Google Images results) will 404 — this was accepted
+deliberately. Nobody but Cloudinary can redirect `res.cloudinary.com`, so the only alternative
+would have been keeping the account alive on the free tier.
 
 ---
 
@@ -288,13 +318,14 @@ WHERE url LIKE '%cloudinary%'
 
 ## Open items
 
-- [ ] Asset count + total GB, and **max asset size** (Phase 0.1)
+- [x] ~~Asset count + total GB~~ → **307 rows, 1,386 objects, ~170 MB, $0/month on R2**
 - [x] ~~Confirm provider supports Strapi 4.13~~ → resolved: use `strapi-provider-cloudflare-r2@0.3.0`
 - [x] ~~Confirm zero transformation URLs~~ → resolved: **4 video preview GIFs DO use transforms**
-- [ ] Pre-generate the 4 video preview GIFs with ffmpeg; decide the policy for future uploads
-- [ ] **Confirm the production database engine.** `config/database.ts` defaults to *sqlite* and
-      the runbook cannot specify backup/restore mechanics until this is known — this is the only
-      rollback path for Phase 2. Test the restore into a scratch DB.
+- [x] ~~Pre-generate the 4 video GIFs with ffmpeg~~ → not needed; the script downloads the
+      rendered GIF from Cloudinary. **Must run before cancellation.** Still open: policy for
+      preview GIFs on *future* video uploads.
+- [x] ~~Confirm the production database engine~~ → **PostgreSQL**. Use `pg_dump`; test the
+      restore into a scratch DB before Phase 2.
 - [ ] Set bucket **CORS** (admin media preview, any `fetch`/canvas use)
 - [ ] Prove `cdn.zerodesignstudios.com` serves a test object **before** the Phase 1 deploy —
       otherwise every post-deploy upload stores a URL that 404s, and those rows are not covered
@@ -306,7 +337,7 @@ WHERE url LIKE '%cloudinary%'
 - [ ] Check Cloudinary **account-level auto-optimisation** (`f_auto`/`q_auto` defaults never
       appear in the URL). If enabled, you are served WebP/AVIF today and R2 will serve original
       JPEG/PNG — a real LCP regression. Mitigate with Cloudflare Polish on the `cdn.` hostname.
-- [ ] Accept the **SEO cost**: image URLs change, Google Images signals reset, and already-shared
+- [x] Accepted the **SEO cost**: image URLs change, Google Images signals reset, and already-shared
       `og:image` links break once Cloudinary is cancelled. Cloudinary offers no redirects, so
       consider a grace period longer than 2–4 weeks.
 - [ ] **`zds-backup` (1.8 MB DB dump) is committed to this repo.** It contains 1,386 Cloudinary
