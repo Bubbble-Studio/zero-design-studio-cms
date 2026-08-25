@@ -2,6 +2,7 @@
 /**
  * Cloudinary → Cloudflare R2 migration for the Strapi `files` table.
  *
+ *   node scripts/migrate-cloudinary-to-r2.mjs reconcile          # Cloudinary vs DB
  *   node scripts/migrate-cloudinary-to-r2.mjs preflight
  *   node scripts/migrate-cloudinary-to-r2.mjs migrate            # dry run (default)
  *   node scripts/migrate-cloudinary-to-r2.mjs migrate --execute
@@ -22,7 +23,7 @@
  *
  * Requires: npm i pg @aws-sdk/client-s3
  */
-import { readFileSync, appendFileSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, appendFileSync, existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import pg from 'pg';
 import { S3Client, PutObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
@@ -275,13 +276,92 @@ async function rollback() {
   console.log('rolled back (R2 objects left in place — harmless, and reused on re-run)');
 }
 
+
+/**
+ * Reconcile what Cloudinary actually holds against what the database references.
+ *
+ * The DB is the migration's source of truth, so anything in Cloudinary that no
+ * row points at will NOT be migrated and dies at cancellation. Run this before
+ * Phase 2 and treat a large orphan count as a stop-and-investigate signal.
+ */
+async function cloudinaryInventory() {
+  const cloud = env('CLOUDINARY_CLOUD_NAME');
+  const auth = Buffer.from(`${env('CLOUDINARY_API_KEY')}:${env('CLOUDINARY_API_SECRET')}`).toString('base64');
+  const all = new Map(); // public_id -> {type, bytes}
+  for (const type of ['image', 'video', 'raw']) {
+    let cursor;
+    do {
+      const u = new URL(`https://api.cloudinary.com/v1_1/${cloud}/resources/${type}`);
+      u.searchParams.set('max_results', '500');
+      if (cursor) u.searchParams.set('next_cursor', cursor);
+      const res = await fetch(u, { headers: { Authorization: `Basic ${auth}` } });
+      if (!res.ok) throw new Error(`Cloudinary ${type}: HTTP ${res.status} ${await res.text()}`);
+      const body = await res.json();
+      for (const r of body.resources ?? []) all.set(r.public_id, { type, bytes: r.bytes ?? 0 });
+      cursor = body.next_cursor;
+    } while (cursor);
+    console.log(`  fetched ${type}: running total ${all.size}`);
+  }
+  return all;
+}
+
+/** Every Cloudinary public_id the database expects to exist. */
+function dbPublicIds(rows) {
+  const ids = new Map(); // public_id -> row id
+  for (const row of rows) {
+    const pm = parseJson(row.provider_metadata);
+    ids.set(pm?.public_id ?? row.hash, row.id);
+    for (const f of Object.values(parseJson(row.formats) || {})) {
+      if (!f) continue;
+      const fpm = parseJson(f.provider_metadata);
+      ids.set(fpm?.public_id ?? f.hash, row.id);
+    }
+  }
+  return ids;
+}
+
+async function reconcile() {
+  const rows = await loadRows();
+  const expected = dbPublicIds(rows);
+  const actual = await cloudinaryInventory();
+
+  const orphans = [...actual.keys()].filter((id) => !expected.has(id));
+  const missing = [...expected.keys()].filter((id) => !actual.has(id));
+  const orphanBytes = orphans.reduce((n, id) => n + (actual.get(id)?.bytes ?? 0), 0);
+
+  console.log(`\nDB rows                        : ${rows.length}`);
+  console.log(`Referenced by DB (public_ids)  : ${expected.size}`);
+  console.log(`Present in Cloudinary          : ${actual.size}`);
+  console.log(`  ✔ matched                    : ${expected.size - missing.length}`);
+  console.log(`  ⚠ in Cloudinary, NOT in DB   : ${orphans.length}  (${(orphanBytes / 1048576).toFixed(1)} MB)`);
+  console.log(`  ✖ in DB, MISSING in Cloudinary: ${missing.length}`);
+
+  writeFileSync('reconcile-orphans.txt', orphans.join('\n'));
+  writeFileSync('reconcile-missing.txt', missing.join('\n'));
+  console.log('\nwrote reconcile-orphans.txt / reconcile-missing.txt');
+
+  if (missing.length) {
+    console.log('\n✖ MISSING assets are already broken on the live site today —');
+    console.log('  the DB points at them but Cloudinary does not have them. Sample:');
+    for (const id of missing.slice(0, 10)) console.log(`    ${id}  (row ${expected.get(id)})`);
+  }
+  if (orphans.length) {
+    console.log('\n⚠ ORPHANS will NOT be migrated and will 404 after cancellation.');
+    console.log('  Usually: assets deleted in Strapi but left in Cloudinary, uploads that');
+    console.log('  predate Strapi, or files pasted straight into rich text. Grep the DB for');
+    console.log('  any of these public_ids before cancelling. Sample:');
+    for (const id of orphans.slice(0, 10)) console.log(`    ${id}`);
+  }
+}
+
 await db.connect();
 try {
-  if (cmd === 'preflight') await preflight();
+  if (cmd === 'reconcile') await reconcile();
+  else if (cmd === 'preflight') await preflight();
   else if (cmd === 'migrate') await migrate();
   else if (cmd === 'verify') await verify();
   else if (cmd === 'rollback') await rollback();
-  else { console.log('commands: preflight | migrate | verify | rollback   (add --execute to write)'); process.exitCode = 1; }
+  else { console.log('commands: reconcile | preflight | migrate | verify | rollback   (add --execute to write)'); process.exitCode = 1; }
 } finally {
   await db.end();
 }

@@ -46,26 +46,45 @@ lifecycle hook should generate previews on upload.
 `zero-store/strapi` runs R2 in production — but see the provider warning in Phase 1: it is
 **Strapi 5**, and its provider package does not support Strapi 4.
 
-## Confirmed inventory (measured, not estimated)
+## Inventory — MUST be re-measured against production
 
-Taken from the `zds-backup` pg_dump, so these are exact rather than guesses:
+> ⚠️ **The numbers previously in this section were wrong and have been removed.**
+> They were derived from `zds-backup`, a pg_dump taken **19 January 2025** — its newest
+> file is dated `2025-01-14` and its highest `files.id` is 369. That snapshot is many months
+> stale, so it described the library as **307 rows / 1,386 objects** while the Cloudinary
+> console reports roughly **4,500 assets**. Do not size, budget or plan from the dump.
 
-| | |
-|---|---|
-| Rows in `files` | **307** (303 images, 4 videos) |
-| Format variants | **1,075** (thumbnail 299 · small 281 · medium 255 · large 240) |
-| Video preview GIFs | **4** |
-| **R2 objects to create** | **1,386** — validated as **1,386 unique keys, 0 collisions** |
-| Payload | ~170 MB (parent rows) |
-| Extensions | png 1,116 · jpg 142 · jpeg 120 · mp4 4 · gif 4 |
+**What the dump is still good for** (structural facts, which do not go stale):
 
-**Cost: effectively $0/month.** R2's free tier covers 10 GB storage and egress is free.
+- Production is **PostgreSQL** — `config/database.ts` merely *defaults* to sqlite.
+- Schema of `files`: `url`, `preview_url`, `formats` (jsonb), `provider`,
+  `provider_metadata` (jsonb), `hash`, `ext`, `mime`, `folder_path`.
+- `folder_path` was `/` on every row, so R2 keys are flat `<hash><ext>` with no nesting.
+  **Re-confirm this** — a Media Library folder created since would change key derivation.
+- Cloudinary `public_id` equals the Strapi `hash` (variants are `<variant>_<hash>`).
 
-**Database is PostgreSQL** (confirmed from the dump — `config/database.ts` merely *defaults*
-to sqlite). Backup/restore is `pg_dump` / `pg_restore`.
+### Get the real numbers first
 
-**`folder_path` is `/` for all 307 rows**, so every R2 key is flat `<hash><ext>` with no
-nesting — this removes the parent/variant key asymmetry the review warned about.
+```bash
+node scripts/migrate-cloudinary-to-r2.mjs reconcile
+```
+
+This pulls the full Cloudinary Admin API inventory (paginated across image/video/raw) and
+diffs it against what the database actually references. It reports three buckets:
+
+| Bucket | Meaning | Action |
+|---|---|---|
+| **matched** | DB references it, Cloudinary has it | migrates normally |
+| **orphans** — in Cloudinary, not in the DB | deleted in Strapi but never removed from Cloudinary, uploads predating Strapi, or URLs pasted directly into rich text | **will NOT migrate and will 404 after cancellation** — investigate before cancelling |
+| **missing** — in the DB, not in Cloudinary | already broken on the live site today | fix or clear these rows |
+
+The gap between ~4,500 in Cloudinary and what the DB references is most likely a mix of
+(a) many months of uploads since the dump, (b) orphans, and (c) Cloudinary counting derived
+/ transformed resources separately from originals. `reconcile` tells you which, with exact
+public_ids written to `reconcile-orphans.txt` and `reconcile-missing.txt`.
+
+**Cost stays negligible regardless.** Even at 4,500 assets the library is a few GB at most;
+R2 is $0.015/GB-month with free egress.
 
 ## Target architecture
 
@@ -248,8 +267,10 @@ which then break the day the account is cancelled.
 **The script is written:** `scripts/migrate-cloudinary-to-r2.mjs`
 (`preflight` | `migrate` | `verify` | `rollback`; writes nothing without `--execute`).
 It is idempotent, resumable, bounded-concurrency, and ledgers every row before rewriting it.
-Its key-derivation logic was validated offline against all 307 rows from the dump:
-**1,386 objects → 1,386 unique keys, 0 collisions, 0 problem rows.**
+Its key-derivation logic was exercised offline against the 307 rows in the (stale) dump and
+produced 1,386 unique keys with no collisions — that is a **logic check only, not an
+inventory**. `preflight` re-runs the same collision check against production, which is the
+result that counts.
 
 **Do not delete anything from Cloudinary in this phase.** It is the rollback.
 
@@ -318,7 +339,11 @@ would have been keeping the account alive on the free tier.
 
 ## Open items
 
-- [x] ~~Asset count + total GB~~ → **307 rows, 1,386 objects, ~170 MB, $0/month on R2**
+- [ ] **Get the real asset count** — run `reconcile`. The dump-derived figure (307 rows /
+      1,386 objects) was stale by many months; Cloudinary reports ~4,500 assets.
+- [ ] **Triage orphans** from `reconcile-orphans.txt` — these will 404 after cancellation
+- [ ] **Triage missing** from `reconcile-missing.txt` — already broken today
+- [ ] Re-confirm `folder_path` is still `/` for all rows (affects R2 key derivation)
 - [x] ~~Confirm provider supports Strapi 4.13~~ → resolved: use `strapi-provider-cloudflare-r2@0.3.0`
 - [x] ~~Confirm zero transformation URLs~~ → resolved: **4 video preview GIFs DO use transforms**
 - [x] ~~Pre-generate the 4 video GIFs with ffmpeg~~ → not needed; the script downloads the
