@@ -136,9 +136,20 @@ Coolify → the Strapi application → **Terminal**.
 CLOUDINARY_CLOUD_NAME=dccjqha6a \
 CLOUDINARY_API_KEY=xxx \
 CLOUDINARY_API_SECRET=xxx \
-node scripts/migrate-cloudinary-to-r2.mjs reconcile
+npm run migrate:reconcile
 ```
 Key and secret: Cloudinary Console → Settings → Access Keys.
+
+All commands are npm scripts:
+
+| Command | Writes? | Needs |
+|---|---|---|
+| `npm run migrate:reconcile` | no | DB + `CLOUDINARY_*` |
+| `npm run migrate:preflight` | no | DB + `CLOUDFLARE_R2_PUBLIC_URL` |
+| `npm run migrate:dry-run` | no | DB + `CLOUDFLARE_R2_*` |
+| `npm run migrate:execute` | **YES** | DB + `CLOUDFLARE_R2_*` + `NEW_PROVIDER_NAME` |
+| `npm run migrate:verify` | no | DB |
+| `npm run migrate:rollback` | **YES** | DB + the ledger file |
 
 It writes `reconcile-orphans.txt` and `reconcile-missing.txt` into the working directory. A
 container filesystem is ephemeral, so read them before the next deploy:
@@ -148,8 +159,8 @@ head -50 reconcile-orphans.txt
 ```
 
 ### 4. Later phases
-`preflight` and `verify` are also read-only. `migrate` writes — take a `pg_dump` first and
-run it against a restored copy before production. `migrate` additionally needs the
+`migrate:preflight` and `migrate:verify` are also read-only. `migrate:execute` writes — take a
+`pg_dump` first and run it against a restored copy before production. `migrate` additionally needs the
 `CLOUDFLARE_R2_*` variables and `NEW_PROVIDER_NAME`; `@aws-sdk/client-s3` is declared as a
 dependency so it is present in the container after a normal install.
 

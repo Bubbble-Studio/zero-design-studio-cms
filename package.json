@@ -7,7 +7,13 @@
     "develop": "strapi develop",
     "start": "strapi start",
     "build": "strapi build",
-    "strapi": "strapi"
+    "strapi": "strapi",
+    "migrate:reconcile": "node scripts/migrate-cloudinary-to-r2.mjs reconcile",
+    "migrate:preflight": "node scripts/migrate-cloudinary-to-r2.mjs preflight",
+    "migrate:dry-run": "node scripts/migrate-cloudinary-to-r2.mjs migrate",
+    "migrate:execute": "node scripts/migrate-cloudinary-to-r2.mjs migrate --execute",
+    "migrate:verify": "node scripts/migrate-cloudinary-to-r2.mjs verify",
+    "migrate:rollback": "node scripts/migrate-cloudinary-to-r2.mjs rollback --execute"
   },
   "dependencies": {
     "@ckeditor/strapi-plugin-ckeditor": "^0.0.10",
