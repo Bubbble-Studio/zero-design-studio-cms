@@ -46,45 +46,56 @@ lifecycle hook should generate previews on upload.
 `zero-store/strapi` runs R2 in production — but see the provider warning in Phase 1: it is
 **Strapi 5**, and its provider package does not support Strapi 4.
 
-## Inventory — MUST be re-measured against production
+## Inventory
 
-> ⚠️ **The numbers previously in this section were wrong and have been removed.**
-> They were derived from `zds-backup`, a pg_dump taken **19 January 2025** — its newest
-> file is dated `2025-01-14` and its highest `files.id` is 369. That snapshot is many months
-> stale, so it described the library as **307 rows / 1,386 objects** while the Cloudinary
-> console reports roughly **4,500 assets**. Do not size, budget or plan from the dump.
+### Live, from production (read-only `preflight`, 2026-08-26)
 
-**What the dump is still good for** (structural facts, which do not go stale):
+| | |
+|---|---|
+| Rows in `files` | **379** |
+| R2 objects to create | **1,736** (unique keys: 1,736, **0 collisions**) |
+| Video preview GIFs | **4** |
+| Already on the CDN | 0 |
 
-- Production is **PostgreSQL** — `config/database.ts` merely *defaults* to sqlite.
-- Schema of `files`: `url`, `preview_url`, `formats` (jsonb), `provider`,
-  `provider_metadata` (jsonb), `hash`, `ext`, `mime`, `folder_path`.
-- `folder_path` was `/` on every row, so R2 keys are flat `<hash><ext>` with no nesting.
-  **Re-confirm this** — a Media Library folder created since would change key derivation.
-- Cloudinary `public_id` equals the Strapi `hash` (variants are `<variant>_<hash>`).
+> An earlier version of this section quoted **307 rows / 1,386 objects**. That came from
+> `zds-backup`, a pg_dump taken **2025-01-19**, and was stale. Always measure with
+> `preflight`, never from the dump.
 
-### Get the real numbers first
+### ⚠️ Unexplained gap: the DB references ~1,736 objects, Cloudinary reports ~4,500
+
+Only 72 rows were added between the Jan-2025 dump and now, so **new uploads do not explain
+the difference**. The remaining ~2,700 are most likely a mix of:
+
+- **Orphans** — assets deleted from the Strapi Media Library but never removed from
+  Cloudinary, uploads predating Strapi, or files uploaded directly to Cloudinary.
+- **Derived resources** — Cloudinary counts each transformation variant it renders
+  (e.g. the `c_scale,dl_200,vs_6,w_250` video previews) as a separate asset.
+- Assets belonging to **other projects** sharing the same Cloudinary account.
+
+**This must be resolved before cancelling Cloudinary**, because the migration uses the
+database as its source of truth: anything Cloudinary holds that no row references will not
+be copied to R2 and will 404 at cancellation.
 
 ```bash
-node scripts/migrate-cloudinary-to-r2.mjs reconcile
+CLOUDINARY_CLOUD_NAME=dccjqha6a CLOUDINARY_API_KEY=... CLOUDINARY_API_SECRET=... \
+  node scripts/migrate-cloudinary-to-r2.mjs reconcile
 ```
-
-This pulls the full Cloudinary Admin API inventory (paginated across image/video/raw) and
-diffs it against what the database actually references. It reports three buckets:
 
 | Bucket | Meaning | Action |
 |---|---|---|
 | **matched** | DB references it, Cloudinary has it | migrates normally |
-| **orphans** — in Cloudinary, not in the DB | deleted in Strapi but never removed from Cloudinary, uploads predating Strapi, or URLs pasted directly into rich text | **will NOT migrate and will 404 after cancellation** — investigate before cancelling |
-| **missing** — in the DB, not in Cloudinary | already broken on the live site today | fix or clear these rows |
+| **orphans** — in Cloudinary, not in DB | see causes above | **will 404 after cancellation** — triage `reconcile-orphans.txt` |
+| **missing** — in DB, not in Cloudinary | already broken on the live site today | fix or clear those rows |
 
-The gap between ~4,500 in Cloudinary and what the DB references is most likely a mix of
-(a) many months of uploads since the dump, (b) orphans, and (c) Cloudinary counting derived
-/ transformed resources separately from originals. `reconcile` tells you which, with exact
-public_ids written to `reconcile-orphans.txt` and `reconcile-missing.txt`.
+### Structural facts (from the dump; re-confirmed by `preflight`)
 
-**Cost stays negligible regardless.** Even at 4,500 assets the library is a few GB at most;
-R2 is $0.015/GB-month with free egress.
+- Production is **PostgreSQL** on Railway — `config/database.ts` merely *defaults* to sqlite.
+- `files` columns: `url`, `preview_url`, `formats` (jsonb), `provider`, `provider_metadata`
+  (jsonb), `hash`, `ext`, `mime`, `folder_path`.
+- R2 keys are flat `<hash><ext>`; `preflight` reports **0 collisions** on live data.
+- Cloudinary `public_id` equals the Strapi `hash` (variants are `<variant>_<hash>`).
+
+**Cost stays negligible** — even at a few GB, R2 is $0.015/GB-month with free egress.
 
 ## Target architecture
 

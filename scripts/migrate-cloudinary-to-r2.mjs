@@ -27,6 +27,25 @@ import { readFileSync, writeFileSync, appendFileSync, existsSync } from 'node:fs
 import { createHash } from 'node:crypto';
 import pg from 'pg';
 
+/**
+ * Strapi loads .env itself at boot; a standalone script does not. Without this the
+ * DATABASE_* fallbacks below silently point at localhost/strapi and you get a
+ * confusing `database "strapi" does not exist`. Real environment variables still
+ * win over .env, so CI/one-off overrides keep working.
+ */
+function loadDotEnv() {
+  const file = new URL('../.env', import.meta.url);
+  if (!existsSync(file)) return;
+  for (const line of readFileSync(file, 'utf8').split('\n')) {
+    const m = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line);
+    if (!m || line.trimStart().startsWith('#')) continue;
+    let v = m[2].trim();
+    if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
+    if (process.env[m[1]] === undefined) process.env[m[1]] = v;
+  }
+}
+loadDotEnv();
+
 const argv = process.argv.slice(2);
 const cmd = argv[0] ?? 'preflight';
 const EXECUTE = argv.includes('--execute');
@@ -376,6 +395,11 @@ if (!COMMANDS[cmd]) {
   console.log('  rollback   restore rows from the ledger  (dry run unless --execute)');
   process.exit(1);
 }
+
+const target = process.env.DATABASE_URL
+  ? new URL(process.env.DATABASE_URL).host
+  : `${process.env.DATABASE_HOST ?? 'localhost'}:${process.env.DATABASE_PORT ?? 5432}/${process.env.DATABASE_NAME ?? 'strapi'}`;
+console.log(`db: ${target}\n`);
 
 await db.connect();
 try {
