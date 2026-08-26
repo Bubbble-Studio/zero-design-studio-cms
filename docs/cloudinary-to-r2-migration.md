@@ -117,6 +117,48 @@ the database stay valid if the bucket ever moves.
 
 ---
 
+## Running the script
+
+The production database is private, so the script runs **inside the Strapi container**, where
+`DATABASE_*` is already in the environment and `pg` is already installed. Nothing needs to be
+passed for the DB connection — the script prints the host it connects to, so check that line.
+
+### 1. Get the script onto the server
+Merge this PR to the deployed branch and redeploy. The file then exists in the container at
+`scripts/migrate-cloudinary-to-r2.mjs`. (Nothing in it runs at boot — it is only ever invoked
+by hand.)
+
+### 2. Open a shell in the container
+Coolify → the Strapi application → **Terminal**.
+
+### 3. Reconcile (read-only, safe on production)
+```bash
+CLOUDINARY_CLOUD_NAME=dccjqha6a \
+CLOUDINARY_API_KEY=xxx \
+CLOUDINARY_API_SECRET=xxx \
+node scripts/migrate-cloudinary-to-r2.mjs reconcile
+```
+Key and secret: Cloudinary Console → Settings → Access Keys.
+
+It writes `reconcile-orphans.txt` and `reconcile-missing.txt` into the working directory. A
+container filesystem is ephemeral, so read them before the next deploy:
+```bash
+wc -l reconcile-orphans.txt reconcile-missing.txt
+head -50 reconcile-orphans.txt
+```
+
+### 4. Later phases
+`preflight` and `verify` are also read-only. `migrate` writes — take a `pg_dump` first and
+run it against a restored copy before production. `migrate` additionally needs the
+`CLOUDFLARE_R2_*` variables and `NEW_PROVIDER_NAME`; `@aws-sdk/client-s3` is declared as a
+dependency so it is present in the container after a normal install.
+
+> **Careful with the DB in this repo's `.env`.** It points at a Railway instance
+> (`viaduct.proxy.rlwy.net`) that is publicly reachable but had **no writes for roughly a
+> year**. It is either a leftover or a production copy that simply has not been edited.
+> Either way, do not assume it is production — always confirm the `db:` line the script
+> prints before running anything with `--execute`.
+
 ## Phase 0 — Inventory and prep (no changes)
 
 0.1 **Size the library.** In the Cloudinary console, record total asset count and storage GB.
