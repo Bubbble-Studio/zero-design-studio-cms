@@ -3,6 +3,7 @@
  * Cloudinary → Cloudflare R2 migration for the Strapi `files` table.
  *
  *   node scripts/migrate-cloudinary-to-r2.mjs reconcile          # Cloudinary vs DB
+ *   node scripts/migrate-cloudinary-to-r2.mjs content-scan       # Cloudinary URLs in content
  *   node scripts/migrate-cloudinary-to-r2.mjs preflight
  *   node scripts/migrate-cloudinary-to-r2.mjs migrate            # dry run (default)
  *   node scripts/migrate-cloudinary-to-r2.mjs migrate --execute
@@ -416,11 +417,12 @@ async function reconcile() {
   }
 }
 
-const COMMANDS = { reconcile, preflight, migrate, verify, rollback };
+const COMMANDS = { reconcile, 'content-scan': contentScan, preflight, migrate, verify, rollback };
 if (!COMMANDS[cmd]) {
   // Validate before connecting, so `--help` / a typo doesn't surface as a DB error.
   console.log('usage: node scripts/migrate-cloudinary-to-r2.mjs <command> [--execute]\n');
-  console.log('  reconcile  Cloudinary inventory vs DB (read-only; needs DB + CLOUDINARY_* only)');
+  console.log('  reconcile     Cloudinary inventory vs DB (read-only; needs DB + CLOUDINARY_* only)');
+  console.log('  content-scan  find Cloudinary URLs pasted into content (read-only; DB only)');
   console.log('  preflight  collision + readiness check (read-only)');
   console.log('  migrate    copy to R2 and rewrite rows   (dry run unless --execute)');
   console.log('  verify     HEAD-check every URL is a real 200');
@@ -433,9 +435,79 @@ const target = process.env.DATABASE_URL
   : `${process.env.DATABASE_HOST ?? 'localhost'}:${process.env.DATABASE_PORT ?? 5432}/${process.env.DATABASE_NAME ?? 'strapi'}`;
 console.log(`db: ${target}\n`);
 
+/**
+ * Scan every text-ish column in the database for Cloudinary URLs.
+ *
+ * `reconcile` only looks at the `files` table, so it cannot see a URL that was pasted
+ * directly into a rich-text field. That matters for two reasons:
+ *   1. Phase 3 has to rewrite those strings — the provider swap does not touch them.
+ *   2. If the referenced asset has no `files` row (an orphan), it is never migrated and
+ *      the page breaks the moment Cloudinary is cancelled.
+ */
+async function contentScan() {
+  const { rows: cols } = await db.query(`
+    SELECT c.table_name, c.column_name, c.data_type
+    FROM information_schema.columns c
+    JOIN information_schema.tables t
+      ON t.table_name = c.table_name AND t.table_schema = c.table_schema
+    WHERE c.table_schema = 'public'
+      AND t.table_type = 'BASE TABLE'
+      AND c.table_name <> 'files'
+      AND c.data_type IN ('text','character varying','jsonb','json')
+    ORDER BY c.table_name, c.column_name`);
+
+  // Everything the files table accounts for — anything outside this set is unbacked.
+  const known = new Set(dbPublicIds(await loadRows()).keys());
+
+  const hits = [];      // { table, column, id, publicId, backed }
+  const scanned = new Set();
+  for (const { table_name: t, column_name: c } of cols) {
+    let res;
+    try {
+      res = await db.query(
+        `SELECT id, "${c}"::text AS v FROM "${t}" WHERE "${c}"::text LIKE '%res.cloudinary.com%'`
+      );
+    } catch {
+      continue; // table without an id column, view, etc.
+    }
+    if (res.rows.length) scanned.add(`${t}.${c}`);
+    for (const row of res.rows) {
+      for (const m of row.v.matchAll(/res\.cloudinary\.com\/[^/]+\/(?:image|video|raw)\/upload\/(?:[^/"'\s]+\/)*?([A-Za-z0-9_\-]+)\.[A-Za-z0-9]+/g)) {
+        hits.push({ table: t, column: c, id: row.id, publicId: m[1], backed: known.has(m[1]) });
+      }
+    }
+  }
+
+  const unbacked = hits.filter((h) => !h.backed);
+  const places = [...new Set(hits.map((h) => `${h.table}.${h.column}`))];
+
+  console.log(`\ntext columns scanned            : ${cols.length}`);
+  console.log(`columns containing Cloudinary   : ${scanned.size}`);
+  console.log(`Cloudinary URLs found in content: ${hits.length}`);
+  console.log(`  ✔ backed by a files row       : ${hits.length - unbacked.length}  (Phase 3 rewrites these)`);
+  console.log(`  ✖ NOT backed by any files row : ${unbacked.length}`);
+
+  if (places.length) {
+    console.log('\nwhere:');
+    for (const p of places) console.log(`  ${p}  (${hits.filter((h) => `${h.table}.${h.column}` === p).length})`);
+  }
+  if (unbacked.length) {
+    writeFileSync('content-unbacked.txt',
+      unbacked.map((h) => `${h.table}.${h.column} row=${h.id} ${h.publicId}`).join('\n'));
+    console.log('\n✖ These will 404 when Cloudinary is cancelled — no files row means no migration.');
+    console.log('  Either re-upload them through the Media Library, or edit the content.');
+    console.log('  Full list: content-unbacked.txt. Sample:');
+    for (const h of unbacked.slice(0, 10)) console.log(`    ${h.table}.${h.column} row=${h.id}  ${h.publicId}`);
+  } else {
+    console.log('\n✔ Every Cloudinary URL in content is backed by a files row.');
+    console.log('  Orphans in Cloudinary are unreferenced and safe to abandon at cancellation.');
+  }
+}
+
 await db.connect();
 try {
   if (cmd === 'reconcile') await reconcile();
+  else if (cmd === 'content-scan') await contentScan();
   else if (cmd === 'preflight') await preflight();
   else if (cmd === 'migrate') await migrate();
   else if (cmd === 'verify') await verify();
