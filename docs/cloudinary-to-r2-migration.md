@@ -161,8 +161,19 @@ head -50 reconcile-orphans.txt
 ### 4. Later phases
 `migrate:preflight` and `migrate:verify` are also read-only. `migrate:execute` writes — take a
 `pg_dump` first and run it against a restored copy before production. `migrate` additionally needs the
-`CLOUDFLARE_R2_*` variables and `NEW_PROVIDER_NAME`; `@aws-sdk/client-s3` is declared as a
-dependency so it is present in the container after a normal install.
+`CLOUDFLARE_R2_*` variables and `NEW_PROVIDER_NAME`.
+
+**No S3 SDK is declared as a dependency, deliberately.** Adding one desyncs
+`package-lock.json`, and the nixpacks build runs `npm ci`, which hard-fails on any
+mismatch — that is exactly how the 2026-08-26 deploy broke. The script instead uses
+whichever SDK is already present: `@aws-sdk/client-s3` (v3) if installed, otherwise
+`aws-sdk` (v2), which `strapi-provider-cloudflare-r2` brings in during Phase 1. If you
+need to run `migrate` before Phase 1, install one ad-hoc in the container:
+```bash
+npm i --no-save @aws-sdk/client-s3
+```
+If you ever *do* add a dependency to this repo, run `npm install` and commit the updated
+`package-lock.json` in the same commit.
 
 > **Careful with the DB in this repo's `.env`.** It points at a Railway instance
 > (`viaduct.proxy.rlwy.net`) that is publicly reachable but had **no writes for roughly a
@@ -432,5 +443,6 @@ would have been keeping the account alive on the free tier.
 - [ ] **`zds-backup` (1.8 MB DB dump) is committed to this repo.** It contains 1,386 Cloudinary
       URLs and full table data — review it for PII/secrets and consider removing it from version
       control independently of this migration.
-- [ ] Regenerate `package-lock.json` on the Phase 1 dependency swap
+- [ ] Regenerate `package-lock.json` on the Phase 1 dependency swap **in the same commit** —
+      `npm ci` in the nixpacks build fails on any package.json/lock mismatch
 - [ ] Decide whether to move the store's bucket to a custom domain too

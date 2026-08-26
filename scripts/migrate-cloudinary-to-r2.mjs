@@ -72,17 +72,59 @@ const bucket = () => (_bucket ??= env('CLOUDFLARE_R2_BUCKET'));
  */
 const providerName = () => (_provider ??= env('NEW_PROVIDER_NAME', 'strapi-provider-cloudflare-r2'));
 
+/**
+ * S3 client adapter. Uses @aws-sdk/client-s3 (v3) when present, otherwise falls back
+ * to aws-sdk (v2), which `strapi-provider-cloudflare-r2` installs in Phase 1. Neither
+ * is a declared dependency of this repo on purpose: adding one desyncs
+ * package-lock.json and breaks `npm ci` in the nixpacks build.
+ *
+ * If neither is available (i.e. you are running `migrate` before Phase 1), install one
+ * ad-hoc in the container first:  npm i --no-save @aws-sdk/client-s3
+ */
 async function s3() {
   if (_s3) return _s3;
-  const { S3Client } = await import('@aws-sdk/client-s3');
-  _s3 = new S3Client({
-    region: 'auto',
+  const cfg = {
     endpoint: env('CLOUDFLARE_R2_ENDPOINT'),
-    credentials: {
-      accessKeyId: env('CLOUDFLARE_R2_ACCESS_KEY_ID'),
-      secretAccessKey: env('CLOUDFLARE_R2_SECRET_ACCESS_KEY'),
-    },
-  });
+    accessKeyId: env('CLOUDFLARE_R2_ACCESS_KEY_ID'),
+    secretAccessKey: env('CLOUDFLARE_R2_SECRET_ACCESS_KEY'),
+  };
+  try {
+    const { S3Client, PutObjectCommand, HeadObjectCommand } = await import('@aws-sdk/client-s3');
+    const c = new S3Client({
+      region: 'auto',
+      endpoint: cfg.endpoint,
+      credentials: { accessKeyId: cfg.accessKeyId, secretAccessKey: cfg.secretAccessKey },
+    });
+    _s3 = {
+      sdk: 'v3',
+      // R2 implements no S3 ACLs, so none is sent.
+      put: (Key, Body, ContentType) =>
+        c.send(new PutObjectCommand({
+          Bucket: bucket(), Key, Body, ContentType: ContentType || 'application/octet-stream',
+          CacheControl: 'public, max-age=31536000, immutable',
+        })),
+      head: (Key) => c.send(new HeadObjectCommand({ Bucket: bucket(), Key })),
+    };
+  } catch {
+    const AWS = (await import('aws-sdk')).default ?? (await import('aws-sdk'));
+    const c = new AWS.S3({
+      endpoint: cfg.endpoint,
+      accessKeyId: cfg.accessKeyId,
+      secretAccessKey: cfg.secretAccessKey,
+      region: 'auto',
+      signatureVersion: 'v4',
+      s3ForcePathStyle: true,
+    });
+    _s3 = {
+      sdk: 'v2',
+      put: (Key, Body, ContentType) =>
+        c.putObject({
+          Bucket: bucket(), Key, Body, ContentType: ContentType || 'application/octet-stream',
+          CacheControl: 'public, max-age=31536000, immutable',
+        }).promise(),
+      head: (Key) => c.headObject({ Bucket: bucket(), Key }).promise(),
+    };
+  }
   return _s3;
 }
 
@@ -124,21 +166,11 @@ async function fetchWithRetry(url, tries = 4) {
 }
 
 async function putObject(key, body, contentType) {
-  const { PutObjectCommand } = await import('@aws-sdk/client-s3');
-  await (await s3()).send(new PutObjectCommand({
-    Bucket: bucket(),
-    Key: key,
-    Body: body,
-    ContentType: contentType || 'application/octet-stream',
-    CacheControl: 'public, max-age=31536000, immutable',
-    // No ACL: R2 does not implement S3 ACLs. Public access comes from the
-    // bucket's public/custom-domain setting.
-  }));
+  await (await s3()).put(key, body, contentType);
 }
 
 async function existsInR2(key) {
-  const { HeadObjectCommand } = await import('@aws-sdk/client-s3');
-  try { await (await s3()).send(new HeadObjectCommand({ Bucket: bucket(), Key: key })); return true; }
+  try { await (await s3()).head(key); return true; }
   catch { return false; }
 }
 
