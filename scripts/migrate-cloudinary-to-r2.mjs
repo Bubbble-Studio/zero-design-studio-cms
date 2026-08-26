@@ -4,6 +4,7 @@
  *
  *   node scripts/migrate-cloudinary-to-r2.mjs reconcile          # Cloudinary vs DB
  *   node scripts/migrate-cloudinary-to-r2.mjs content-scan       # Cloudinary URLs in content
+ *   node scripts/migrate-cloudinary-to-r2.mjs content-migrate    # Phase 3: rewrite content URLs
  *   node scripts/migrate-cloudinary-to-r2.mjs preflight
  *   node scripts/migrate-cloudinary-to-r2.mjs migrate            # dry run (default)
  *   node scripts/migrate-cloudinary-to-r2.mjs migrate --execute
@@ -417,12 +418,13 @@ async function reconcile() {
   }
 }
 
-const COMMANDS = { reconcile, 'content-scan': contentScan, preflight, migrate, verify, rollback };
+const COMMANDS = { reconcile, 'content-scan': contentScan, 'content-migrate': contentMigrate, preflight, migrate, verify, rollback };
 if (!COMMANDS[cmd]) {
   // Validate before connecting, so `--help` / a typo doesn't surface as a DB error.
   console.log('usage: node scripts/migrate-cloudinary-to-r2.mjs <command> [--execute]\n');
   console.log('  reconcile     Cloudinary inventory vs DB (read-only; needs DB + CLOUDINARY_* only)');
   console.log('  content-scan  find Cloudinary URLs pasted into content (read-only; DB only)');
+  console.log('  content-migrate  Phase 3: rewrite content URLs (dry run unless --execute)');
   console.log('  preflight  collision + readiness check (read-only)');
   console.log('  migrate    copy to R2 and rewrite rows   (dry run unless --execute)');
   console.log('  verify     HEAD-check every URL is a real 200');
@@ -504,10 +506,88 @@ async function contentScan() {
   }
 }
 
+/** Every Cloudinary URL in content, with the R2 key it maps to. */
+const CONTENT_URL_RE =
+  /https?:\/\/res\.cloudinary\.com\/[^/]+\/(?:image|video|raw)\/upload\/(?:[^/"'\s]+\/)*?([A-Za-z0-9_\-]+)(\.[A-Za-z0-9]+)/g;
+
+async function contentColumns() {
+  const { rows } = await db.query(`
+    SELECT c.table_name, c.column_name
+    FROM information_schema.columns c
+    JOIN information_schema.tables t
+      ON t.table_name = c.table_name AND t.table_schema = c.table_schema
+    WHERE c.table_schema = 'public' AND t.table_type = 'BASE TABLE'
+      AND c.table_name <> 'files'
+      AND c.data_type IN ('text','character varying','jsonb','json')
+    ORDER BY c.table_name, c.column_name`);
+  return rows;
+}
+
+/**
+ * Phase 3 — rewrite Cloudinary URLs embedded in content.
+ *
+ * Every URL maps to `${CDN}/<public_id><ext>`, which is the same key `migrate` uses for
+ * files (public_id === hash for this dataset). URLs whose asset has no `files` row are
+ * copied to R2 here, since `migrate` would never see them.
+ */
+async function contentMigrate() {
+  if (!EXECUTE) console.log('DRY RUN — no uploads or DB writes. Re-run with --execute to apply.\n');
+  const known = new Set(dbPublicIds(await loadRows()).keys());
+  const cols = await contentColumns();
+
+  let rewritten = 0, urls = 0, copied = 0;
+  const copiedKeys = new Set();
+
+  for (const { table_name: t, column_name: c } of cols) {
+    let res;
+    try {
+      res = await db.query(`SELECT id, "${c}"::text AS v FROM "${t}" WHERE "${c}"::text LIKE '%res.cloudinary.com%'`);
+    } catch { continue; }
+
+    for (const row of res.rows) {
+      const matches = [...row.v.matchAll(CONTENT_URL_RE)];
+      if (!matches.length) continue;
+      urls += matches.length;
+
+      // Anything without a files row must be copied now, while Cloudinary is still up.
+      for (const m of matches) {
+        const [full, publicId, ext] = m;
+        const key = `${publicId}${ext}`;
+        if (known.has(publicId) || copiedKeys.has(key)) continue;
+        if (!EXECUTE) { console.log(`  would copy unbacked: ${key}  (${t}.${c} row=${row.id})`); copiedKeys.add(key); copied++; continue; }
+        if (!(await existsInR2(key))) {
+          const buf = await fetchWithRetry(full);
+          await putObject(key, buf, undefined); // ext drives the browser; R2 needs a type
+          if (!(await existsInR2(key))) throw new Error(`post-upload HEAD failed for ${key}`);
+        }
+        copiedKeys.add(key); copied++;
+        console.log(`  copied unbacked: ${key}`);
+      }
+
+      const next = row.v.replace(CONTENT_URL_RE, (_f, publicId, ext) => `${cdn()}/${publicId}${ext}`);
+      if (next === row.v) continue;
+
+      if (!EXECUTE) { rewritten++; continue; }
+      appendFileSync(LEDGER, JSON.stringify({
+        kind: 'content', table: t, column: c, id: row.id, at: new Date().toISOString(), before: row.v,
+      }) + '\n');
+      await db.query(`UPDATE "${t}" SET "${c}" = $1::jsonb WHERE id = $2`, [next, row.id])
+        .catch(() => db.query(`UPDATE "${t}" SET "${c}" = $1 WHERE id = $2`, [next, row.id]));
+      rewritten++;
+    }
+  }
+
+  console.log(`\nCloudinary URLs in content : ${urls}`);
+  console.log(`unbacked assets copied     : ${copied}`);
+  console.log(`rows ${EXECUTE ? 'rewritten' : 'that would be rewritten'} : ${rewritten}`);
+  if (EXECUTE) console.log(`ledger: ${LEDGER}`);
+}
+
 await db.connect();
 try {
   if (cmd === 'reconcile') await reconcile();
   else if (cmd === 'content-scan') await contentScan();
+  else if (cmd === 'content-migrate') await contentMigrate();
   else if (cmd === 'preflight') await preflight();
   else if (cmd === 'migrate') await migrate();
   else if (cmd === 'verify') await verify();

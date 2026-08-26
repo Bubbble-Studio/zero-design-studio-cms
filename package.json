@@ -14,7 +14,9 @@
     "migrate:execute": "node scripts/migrate-cloudinary-to-r2.mjs migrate --execute",
     "migrate:verify": "node scripts/migrate-cloudinary-to-r2.mjs verify",
     "migrate:rollback": "node scripts/migrate-cloudinary-to-r2.mjs rollback --execute",
-    "migrate:content-scan": "node scripts/migrate-cloudinary-to-r2.mjs content-scan"
+    "migrate:content-scan": "node scripts/migrate-cloudinary-to-r2.mjs content-scan",
+    "migrate:content-dry-run": "node scripts/migrate-cloudinary-to-r2.mjs content-migrate",
+    "migrate:content-execute": "node scripts/migrate-cloudinary-to-r2.mjs content-migrate --execute"
   },
   "dependencies": {
     "@ckeditor/strapi-plugin-ckeditor": "^0.0.10",
