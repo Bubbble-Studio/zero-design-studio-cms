@@ -26,7 +26,6 @@
 import { readFileSync, writeFileSync, appendFileSync, existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import pg from 'pg';
-import { S3Client, PutObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
 
 const argv = process.argv.slice(2);
 const cmd = argv[0] ?? 'preflight';
@@ -40,23 +39,33 @@ const env = (k, fallback) => {
   return v;
 };
 
-const CDN = env('CLOUDFLARE_R2_PUBLIC_URL').replace(/\/$/, '');
-const BUCKET = env('CLOUDFLARE_R2_BUCKET');
+/**
+ * R2 config is resolved lazily so that read-only commands (`reconcile`,
+ * `rollback`) run with nothing but database credentials — they never touch R2.
+ */
+let _cdn, _bucket, _provider, _s3;
+const cdn = () => (_cdn ??= env('CLOUDFLARE_R2_PUBLIC_URL').replace(/\/$/, ''));
+const bucket = () => (_bucket ??= env('CLOUDFLARE_R2_BUCKET'));
 /**
  * Must match the string the configured provider writes for NEW uploads.
  * Do a Phase 1 test upload and read files.provider from that row before running
  * with --execute, otherwise the table ends up with two different values.
  */
-const NEW_PROVIDER = env('NEW_PROVIDER_NAME', 'strapi-provider-cloudflare-r2');
+const providerName = () => (_provider ??= env('NEW_PROVIDER_NAME', 'strapi-provider-cloudflare-r2'));
 
-const s3 = new S3Client({
-  region: 'auto',
-  endpoint: env('CLOUDFLARE_R2_ENDPOINT'),
-  credentials: {
-    accessKeyId: env('CLOUDFLARE_R2_ACCESS_KEY_ID'),
-    secretAccessKey: env('CLOUDFLARE_R2_SECRET_ACCESS_KEY'),
-  },
-});
+async function s3() {
+  if (_s3) return _s3;
+  const { S3Client } = await import('@aws-sdk/client-s3');
+  _s3 = new S3Client({
+    region: 'auto',
+    endpoint: env('CLOUDFLARE_R2_ENDPOINT'),
+    credentials: {
+      accessKeyId: env('CLOUDFLARE_R2_ACCESS_KEY_ID'),
+      secretAccessKey: env('CLOUDFLARE_R2_SECRET_ACCESS_KEY'),
+    },
+  });
+  return _s3;
+}
 
 const db = new pg.Client(
   process.env.DATABASE_URL
@@ -71,11 +80,11 @@ const db = new pg.Client(
 );
 
 const isCloudinary = (u) => typeof u === 'string' && u.includes('res.cloudinary.com');
-const onCdn = (u) => typeof u === 'string' && u.startsWith(CDN);
+const onCdn = (u) => typeof u === 'string' && u.startsWith(cdn());
 /** Flat key: folder_path is "/" for every row in this dataset. */
 const keyFor = (hash, ext) => `${hash}${ext ?? ''}`;
 const previewKeyFor = (hash) => `${hash}_preview.gif`;
-const cdnUrl = (key) => `${CDN}/${key}`;
+const cdnUrl = (key) => `${cdn()}/${key}`;
 
 async function fetchWithRetry(url, tries = 4) {
   let lastErr;
@@ -96,8 +105,9 @@ async function fetchWithRetry(url, tries = 4) {
 }
 
 async function putObject(key, body, contentType) {
-  await s3.send(new PutObjectCommand({
-    Bucket: BUCKET,
+  const { PutObjectCommand } = await import('@aws-sdk/client-s3');
+  await (await s3()).send(new PutObjectCommand({
+    Bucket: bucket(),
     Key: key,
     Body: body,
     ContentType: contentType || 'application/octet-stream',
@@ -108,7 +118,8 @@ async function putObject(key, body, contentType) {
 }
 
 async function existsInR2(key) {
-  try { await s3.send(new HeadObjectCommand({ Bucket: BUCKET, Key: key })); return true; }
+  const { HeadObjectCommand } = await import('@aws-sdk/client-s3');
+  try { await (await s3()).send(new HeadObjectCommand({ Bucket: bucket(), Key: key })); return true; }
   catch { return false; }
 }
 
@@ -163,7 +174,7 @@ async function preflight() {
     console.log('\nABORT: resolve collisions before migrating — two rows would overwrite one object.');
     process.exitCode = 1;
   }
-  console.log(`\nprovider string that will be written: ${NEW_PROVIDER}`);
+  console.log(`\nprovider string that will be written: ${providerName()}`);
   console.log('Verify that against a Phase 1 test upload before running --execute.');
 }
 
@@ -197,7 +208,7 @@ async function migrateRow(row) {
     url: cdnUrl(keyFor(row.hash, row.ext)),
     preview_url: row.preview_url ? cdnUrl(previewKeyFor(row.hash)) : null,
     formats: formats ? JSON.stringify(formats) : null,
-    provider: NEW_PROVIDER,
+    provider: providerName(),
     provider_metadata: null,
   };
 
@@ -352,6 +363,18 @@ async function reconcile() {
     console.log('  any of these public_ids before cancelling. Sample:');
     for (const id of orphans.slice(0, 10)) console.log(`    ${id}`);
   }
+}
+
+const COMMANDS = { reconcile, preflight, migrate, verify, rollback };
+if (!COMMANDS[cmd]) {
+  // Validate before connecting, so `--help` / a typo doesn't surface as a DB error.
+  console.log('usage: node scripts/migrate-cloudinary-to-r2.mjs <command> [--execute]\n');
+  console.log('  reconcile  Cloudinary inventory vs DB (read-only; needs DB + CLOUDINARY_* only)');
+  console.log('  preflight  collision + readiness check (read-only)');
+  console.log('  migrate    copy to R2 and rewrite rows   (dry run unless --execute)');
+  console.log('  verify     HEAD-check every URL is a real 200');
+  console.log('  rollback   restore rows from the ledger  (dry run unless --execute)');
+  process.exit(1);
 }
 
 await db.connect();
