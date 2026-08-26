@@ -33,18 +33,69 @@ still images only. Escalating to Cloudflare Images does *not* solve this.
 These are load-bearing, not dead data. `zds-client` renders them as a CSS background:
 `src/routes/services/[slug]/+page.svelte:50` (`MainVideo.data.attributes.previewUrl`) and `:80`.
 
-**Required work:** pre-generate the four GIFs once with `ffmpeg` and upload them to R2 as static
-objects, then point `preview_url` at them. Roughly:
-```bash
-ffmpeg -i <source>.mp4 -vf "fps=5,scale=250:-1:flags=lanczos" -loop 0 <name>.gif
-```
-Match the visual result of `vs_6,dl_200,w_250` before/after. Any *new* video uploaded after the
-migration will have **no** `preview_url` — the R2 provider does not generate one. Decide whether
-that is acceptable or whether a Strapi lifecycle hook should generate previews on upload.
+**Solved without ffmpeg.** The Cloudinary transform URL *renders and returns a real GIF*, so
+while the account is still live the migration simply downloads that rendered result and stores it
+as a static R2 object (`<hash>_preview.gif`). The script does this automatically. This only works
+**before** cancellation — it is a hard ordering constraint.
+
+Still true: any *new* video uploaded after the migration will have **no** `preview_url`, because
+the R2 provider does not generate one. Decide whether that is acceptable or whether a Strapi
+lifecycle hook should generate previews on upload.
 
 ### ✅ A proven R2 setup exists in the org
 `zero-store/strapi` runs R2 in production — but see the provider warning in Phase 1: it is
 **Strapi 5**, and its provider package does not support Strapi 4.
+
+## Inventory
+
+### Live, from production (read-only `preflight`, 2026-08-26)
+
+| | |
+|---|---|
+| Rows in `files` | **379** |
+| R2 objects to create | **1,736** (unique keys: 1,736, **0 collisions**) |
+| Video preview GIFs | **4** |
+| Already on the CDN | 0 |
+
+> An earlier version of this section quoted **307 rows / 1,386 objects**. That came from
+> `zds-backup`, a pg_dump taken **2025-01-19**, and was stale. Always measure with
+> `preflight`, never from the dump.
+
+### ⚠️ Unexplained gap: the DB references ~1,736 objects, Cloudinary reports ~4,500
+
+Only 72 rows were added between the Jan-2025 dump and now, so **new uploads do not explain
+the difference**. The remaining ~2,700 are most likely a mix of:
+
+- **Orphans** — assets deleted from the Strapi Media Library but never removed from
+  Cloudinary, uploads predating Strapi, or files uploaded directly to Cloudinary.
+- **Derived resources** — Cloudinary counts each transformation variant it renders
+  (e.g. the `c_scale,dl_200,vs_6,w_250` video previews) as a separate asset.
+- Assets belonging to **other projects** sharing the same Cloudinary account.
+
+**This must be resolved before cancelling Cloudinary**, because the migration uses the
+database as its source of truth: anything Cloudinary holds that no row references will not
+be copied to R2 and will 404 at cancellation.
+
+```bash
+CLOUDINARY_CLOUD_NAME=dccjqha6a CLOUDINARY_API_KEY=... CLOUDINARY_API_SECRET=... \
+  node scripts/migrate-cloudinary-to-r2.mjs reconcile
+```
+
+| Bucket | Meaning | Action |
+|---|---|---|
+| **matched** | DB references it, Cloudinary has it | migrates normally |
+| **orphans** — in Cloudinary, not in DB | see causes above | **will 404 after cancellation** — triage `reconcile-orphans.txt` |
+| **missing** — in DB, not in Cloudinary | already broken on the live site today | fix or clear those rows |
+
+### Structural facts (from the dump; re-confirmed by `preflight`)
+
+- Production is **PostgreSQL** on Railway — `config/database.ts` merely *defaults* to sqlite.
+- `files` columns: `url`, `preview_url`, `formats` (jsonb), `provider`, `provider_metadata`
+  (jsonb), `hash`, `ext`, `mime`, `folder_path`.
+- R2 keys are flat `<hash><ext>`; `preflight` reports **0 collisions** on live data.
+- Cloudinary `public_id` equals the Strapi `hash` (variants are `<variant>_<hash>`).
+
+**Cost stays negligible** — even at a few GB, R2 is $0.015/GB-month with free egress.
 
 ## Target architecture
 
@@ -65,6 +116,59 @@ the database stay valid if the bucket ever moves.
 > behind a custom domain is worth doing as a separate task.
 
 ---
+
+## Running the script
+
+The production database is private, so the script runs **inside the Strapi container**, where
+`DATABASE_*` is already in the environment and `pg` is already installed. Nothing needs to be
+passed for the DB connection — the script prints the host it connects to, so check that line.
+
+### 1. Get the script onto the server
+Merge this PR to the deployed branch and redeploy. The file then exists in the container at
+`scripts/migrate-cloudinary-to-r2.mjs`. (Nothing in it runs at boot — it is only ever invoked
+by hand.)
+
+### 2. Open a shell in the container
+Coolify → the Strapi application → **Terminal**.
+
+### 3. Reconcile (read-only, safe on production)
+```bash
+CLOUDINARY_CLOUD_NAME=dccjqha6a \
+CLOUDINARY_API_KEY=xxx \
+CLOUDINARY_API_SECRET=xxx \
+npm run migrate:reconcile
+```
+Key and secret: Cloudinary Console → Settings → Access Keys.
+
+All commands are npm scripts:
+
+| Command | Writes? | Needs |
+|---|---|---|
+| `npm run migrate:reconcile` | no | DB + `CLOUDINARY_*` |
+| `npm run migrate:preflight` | no | DB + `CLOUDFLARE_R2_PUBLIC_URL` |
+| `npm run migrate:dry-run` | no | DB + `CLOUDFLARE_R2_*` |
+| `npm run migrate:execute` | **YES** | DB + `CLOUDFLARE_R2_*` + `NEW_PROVIDER_NAME` |
+| `npm run migrate:verify` | no | DB |
+| `npm run migrate:rollback` | **YES** | DB + the ledger file |
+
+It writes `reconcile-orphans.txt` and `reconcile-missing.txt` into the working directory. A
+container filesystem is ephemeral, so read them before the next deploy:
+```bash
+wc -l reconcile-orphans.txt reconcile-missing.txt
+head -50 reconcile-orphans.txt
+```
+
+### 4. Later phases
+`migrate:preflight` and `migrate:verify` are also read-only. `migrate:execute` writes — take a
+`pg_dump` first and run it against a restored copy before production. `migrate` additionally needs the
+`CLOUDFLARE_R2_*` variables and `NEW_PROVIDER_NAME`; `@aws-sdk/client-s3` is declared as a
+dependency so it is present in the container after a normal install.
+
+> **Careful with the DB in this repo's `.env`.** It points at a Railway instance
+> (`viaduct.proxy.rlwy.net`) that is publicly reachable but had **no writes for roughly a
+> year**. It is either a leftover or a production copy that simply has not been edited.
+> Either way, do not assume it is production — always confirm the `db:` line the script
+> prints before running anything with `--execute`.
 
 ## Phase 0 — Inventory and prep (no changes)
 
@@ -224,8 +328,13 @@ host (`res.cloudinary.com`), not the Admin API, which is hard rate-limited.
 JSON; rewriting only the top-level `url` leaves thumbnails silently pointing at Cloudinary,
 which then break the day the account is cancelled.
 
-The script must be **idempotent** (safe to re-run — skip rows already on the CDN domain) and
-have a **dry-run mode** that reports what it would change without writing.
+**The script is written:** `scripts/migrate-cloudinary-to-r2.mjs`
+(`preflight` | `migrate` | `verify` | `rollback`; writes nothing without `--execute`).
+It is idempotent, resumable, bounded-concurrency, and ledgers every row before rewriting it.
+Its key-derivation logic was exercised offline against the 307 rows in the (stale) dump and
+produced 1,386 unique keys with no collisions — that is a **logic check only, not an
+inventory**. `preflight` re-runs the same collision check against production, which is the
+result that counts.
 
 **Do not delete anything from Cloudinary in this phase.** It is the rollback.
 
@@ -274,7 +383,13 @@ WHERE url LIKE '%cloudinary%'
    full-size images **and the four video preview GIFs** all render.
 3. Remove `res.cloudinary.com` from the CSP in `middlewares.ts`.
 4. Leave the Cloudinary account active for a **grace period (2–4 weeks)** in case something
-   was missed, then downgrade/cancel.
+   was missed, then cancel.
+
+**Decision on old links: internal only.** Every URL stored in the database and in content is
+rewritten to R2, and Cloudinary is then **cancelled**. Cloudinary URLs previously shared
+externally (og:image on old social posts, Google Images results) will 404 — this was accepted
+deliberately. Nobody but Cloudinary can redirect `res.cloudinary.com`, so the only alternative
+would have been keeping the account alive on the free tier.
 
 ---
 
@@ -288,13 +403,18 @@ WHERE url LIKE '%cloudinary%'
 
 ## Open items
 
-- [ ] Asset count + total GB, and **max asset size** (Phase 0.1)
+- [ ] **Get the real asset count** — run `reconcile`. The dump-derived figure (307 rows /
+      1,386 objects) was stale by many months; Cloudinary reports ~4,500 assets.
+- [ ] **Triage orphans** from `reconcile-orphans.txt` — these will 404 after cancellation
+- [ ] **Triage missing** from `reconcile-missing.txt` — already broken today
+- [ ] Re-confirm `folder_path` is still `/` for all rows (affects R2 key derivation)
 - [x] ~~Confirm provider supports Strapi 4.13~~ → resolved: use `strapi-provider-cloudflare-r2@0.3.0`
 - [x] ~~Confirm zero transformation URLs~~ → resolved: **4 video preview GIFs DO use transforms**
-- [ ] Pre-generate the 4 video preview GIFs with ffmpeg; decide the policy for future uploads
-- [ ] **Confirm the production database engine.** `config/database.ts` defaults to *sqlite* and
-      the runbook cannot specify backup/restore mechanics until this is known — this is the only
-      rollback path for Phase 2. Test the restore into a scratch DB.
+- [x] ~~Pre-generate the 4 video GIFs with ffmpeg~~ → not needed; the script downloads the
+      rendered GIF from Cloudinary. **Must run before cancellation.** Still open: policy for
+      preview GIFs on *future* video uploads.
+- [x] ~~Confirm the production database engine~~ → **PostgreSQL**. Use `pg_dump`; test the
+      restore into a scratch DB before Phase 2.
 - [ ] Set bucket **CORS** (admin media preview, any `fetch`/canvas use)
 - [ ] Prove `cdn.zerodesignstudios.com` serves a test object **before** the Phase 1 deploy —
       otherwise every post-deploy upload stores a URL that 404s, and those rows are not covered
@@ -306,7 +426,7 @@ WHERE url LIKE '%cloudinary%'
 - [ ] Check Cloudinary **account-level auto-optimisation** (`f_auto`/`q_auto` defaults never
       appear in the URL). If enabled, you are served WebP/AVIF today and R2 will serve original
       JPEG/PNG — a real LCP regression. Mitigate with Cloudflare Polish on the `cdn.` hostname.
-- [ ] Accept the **SEO cost**: image URLs change, Google Images signals reset, and already-shared
+- [x] Accepted the **SEO cost**: image URLs change, Google Images signals reset, and already-shared
       `og:image` links break once Cloudinary is cancelled. Cloudinary offers no redirects, so
       consider a grace period longer than 2–4 weeks.
 - [ ] **`zds-backup` (1.8 MB DB dump) is committed to this repo.** It contains 1,386 Cloudinary
