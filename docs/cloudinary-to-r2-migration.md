@@ -48,44 +48,50 @@ lifecycle hook should generate previews on upload.
 
 ## Inventory
 
-### Live, from production (read-only `preflight`, 2026-08-26)
+### Live, from production (`reconcile`, 2026-08-26)
+
+Run against the real production database (`as84wc8scss0gs4oosgcsowk:5432`):
 
 | | |
 |---|---|
-| Rows in `files` | **379** |
-| R2 objects to create | **1,736** (unique keys: 1,736, **0 collisions**) |
-| Video preview GIFs | **4** |
-| Already on the CDN | 0 |
+| Rows in `files` | **929** |
+| Public_ids referenced by the DB | **4,290** |
+| Assets present in Cloudinary | **4,505** |
+| ✔ matched | **4,290** — every referenced asset exists |
+| ⚠ orphans (in Cloudinary, not in DB) | **215** (184.5 MB) |
+| ✖ missing (in DB, not in Cloudinary) | **0** — nothing is broken today |
 
-> An earlier version of this section quoted **307 rows / 1,386 objects**. That came from
-> `zds-backup`, a pg_dump taken **2025-01-19**, and was stale. Always measure with
-> `preflight`, never from the dump.
+**The ~4,500 figure is fully explained**: 4,290 referenced + 215 orphans.
 
-### ⚠️ Unexplained gap: the DB references ~1,736 objects, Cloudinary reports ~4,500
+The orphans arrive in complete Strapi upload sets — e.g. `How_Zero_banner_9147e6a350`
+together with its `large_` / `medium_` / `small_` / `thumbnail_` variants — so 215 objects is
+roughly **43 original files** deleted from the Media Library whose Cloudinary copies were
+never removed.
 
-Only 72 rows were added between the Jan-2025 dump and now, so **new uploads do not explain
-the difference**. The remaining ~2,700 are most likely a mix of:
+> ⚠️ Earlier revisions of this document quoted **307 rows** (from the Jan-2025 `zds-backup`
+> dump) and then **379 rows** (from the Railway database in this repo's `.env`). Both were
+> wrong: the dump was stale, and the Railway instance is not production. The production
+> database is private and reachable only from inside the Coolify network — which is why the
+> script runs in the Strapi container.
 
-- **Orphans** — assets deleted from the Strapi Media Library but never removed from
-  Cloudinary, uploads predating Strapi, or files uploaded directly to Cloudinary.
-- **Derived resources** — Cloudinary counts each transformation variant it renders
-  (e.g. the `c_scale,dl_200,vs_6,w_250` video previews) as a separate asset.
-- Assets belonging to **other projects** sharing the same Cloudinary account.
+### Are the orphans safe to abandon?
 
-**This must be resolved before cancelling Cloudinary**, because the migration uses the
-database as its source of truth: anything Cloudinary holds that no row references will not
-be copied to R2 and will 404 at cancellation.
+`reconcile` only inspects the `files` table, so it cannot see a Cloudinary URL pasted
+straight into a rich-text field. If such a URL points at an orphan, it is live on the site
+today and will 404 at cancellation. Settle it before cancelling:
 
 ```bash
-CLOUDINARY_CLOUD_NAME=dccjqha6a CLOUDINARY_API_KEY=... CLOUDINARY_API_SECRET=... \
-  node scripts/migrate-cloudinary-to-r2.mjs reconcile
+npm run migrate:content-scan
 ```
 
-| Bucket | Meaning | Action |
-|---|---|---|
-| **matched** | DB references it, Cloudinary has it | migrates normally |
-| **orphans** — in Cloudinary, not in DB | see causes above | **will 404 after cancellation** — triage `reconcile-orphans.txt` |
-| **missing** — in DB, not in Cloudinary | already broken on the live site today | fix or clear those rows |
+It scans every `text` / `varchar` / `jsonb` column in the database for Cloudinary URLs and
+splits them into:
+
+- **backed by a files row** — normal; Phase 3 rewrites these strings
+- **not backed by any files row** — ⚠️ these are never migrated and will break; written to
+  `content-unbacked.txt` with table, column and row id
+
+If that count is **0**, the 215 orphans are genuinely unreferenced and can be abandoned.
 
 ### Structural facts (from the dump; re-confirmed by `preflight`)
 
@@ -145,6 +151,7 @@ All commands are npm scripts:
 | Command | Writes? | Needs |
 |---|---|---|
 | `npm run migrate:reconcile` | no | DB + `CLOUDINARY_*` |
+| `npm run migrate:content-scan` | no | DB only |
 | `npm run migrate:preflight` | no | DB + `CLOUDFLARE_R2_PUBLIC_URL` |
 | `npm run migrate:dry-run` | no | DB + `CLOUDFLARE_R2_*` |
 | `npm run migrate:execute` | **YES** | DB + `CLOUDFLARE_R2_*` + `NEW_PROVIDER_NAME` |
@@ -414,10 +421,10 @@ would have been keeping the account alive on the free tier.
 
 ## Open items
 
-- [ ] **Get the real asset count** — run `reconcile`. The dump-derived figure (307 rows /
-      1,386 objects) was stale by many months; Cloudinary reports ~4,500 assets.
-- [ ] **Triage orphans** from `reconcile-orphans.txt` — these will 404 after cancellation
-- [ ] **Triage missing** from `reconcile-missing.txt` — already broken today
+- [x] ~~Get the real asset count~~ → **929 rows / 4,290 referenced / 4,505 in Cloudinary**
+- [ ] **Triage the 215 orphans** — run `migrate:content-scan`; if nothing unbacked turns up
+      they are unreferenced and safe to abandon
+- [x] ~~Triage missing~~ → **0 missing**; nothing on the site is broken today
 - [ ] Re-confirm `folder_path` is still `/` for all rows (affects R2 key derivation)
 - [x] ~~Confirm provider supports Strapi 4.13~~ → resolved: use `strapi-provider-cloudflare-r2@0.3.0`
 - [x] ~~Confirm zero transformation URLs~~ → resolved: **4 video preview GIFs DO use transforms**
