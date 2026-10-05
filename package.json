@@ -8,6 +8,7 @@
     "start": "strapi start",
     "build": "strapi build",
     "strapi": "strapi",
+    "migrate:report": "npm run -s migrate:reconcile && npm run -s migrate:content-scan && npm run -s migrate:preflight",
     "migrate:reconcile": "node scripts/migrate-cloudinary-to-r2.mjs reconcile",
     "migrate:preflight": "node scripts/migrate-cloudinary-to-r2.mjs preflight",
     "migrate:dry-run": "node scripts/migrate-cloudinary-to-r2.mjs migrate",

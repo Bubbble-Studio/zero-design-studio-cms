@@ -11,10 +11,17 @@
  *   node scripts/migrate-cloudinary-to-r2.mjs verify
  *   node scripts/migrate-cloudinary-to-r2.mjs rollback --execute
  *
+ * Test-round scoping (any command that touches rows):
+ *   --ids=12,57,301     only these files rows (or, with --table, these content rows)
+ *   --limit=10          only the first N rows still on Cloudinary
+ *   --table=works       content-migrate only: restrict to one content table
+ *
  * Design notes (see docs/cloudinary-to-r2-migration.md):
- *  - R2 object keys are derived from `hash` + `ext`, NOT from the Cloudinary URL,
- *    because the Strapi provider recomputes the key on every read and delete.
- *    Get this wrong and the Media Library's delete button silently no-ops.
+ *  - R2 object keys mirror strapi-provider-cloudflare-r2@0.3.0 exactly (`pool: false`):
+ *    the parent object is `<folder_path>/<hash><ext>` (no prefix at the root folder) and
+ *    format variants are flat `<hash><ext>`, because Strapi passes no folderPath for
+ *    them. The provider recomputes this key on delete, so any mismatch makes the Media
+ *    Library's delete button silently miss the object.
  *  - `hash`, `ext` and `mime` are never modified — they are the key source of truth.
  *  - Every upload sets ContentType (R2 would otherwise serve
  *    application/octet-stream, making browsers download images instead of
@@ -23,7 +30,8 @@
  *    and the original values are appended to a ledger first, so a failed
  *    download can never leave a rewritten-but-broken row.
  *
- * Requires: npm i pg @aws-sdk/client-s3
+ * Requires pg (a dependency) and an S3 SDK: aws-sdk v2 arrives with the Phase 1
+ * provider; @aws-sdk/client-s3 (v3) is used instead when installed.
  */
 import { readFileSync, writeFileSync, appendFileSync, existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -51,6 +59,15 @@ loadDotEnv();
 const argv = process.argv.slice(2);
 const cmd = argv[0] ?? 'preflight';
 const EXECUTE = argv.includes('--execute');
+/** Reads `--name=value` or `--name value`. */
+const flag = (name) => {
+  const i = argv.findIndex((a) => a === `--${name}` || a.startsWith(`--${name}=`));
+  if (i < 0) return undefined;
+  return argv[i].includes('=') ? argv[i].split('=').slice(1).join('=') : argv[i + 1];
+};
+const ONLY_IDS = flag('ids') ? new Set(flag('ids').split(',').map((x) => Number(x.trim())).filter(Boolean)) : null;
+const LIMIT = flag('limit') ? Number(flag('limit')) : null;
+const ONLY_TABLE = flag('table') ?? null;
 const LEDGER = process.env.MIGRATION_LEDGER ?? 'migration-ledger.jsonl';
 const CONCURRENCY = Number(process.env.MIGRATION_CONCURRENCY ?? 6);
 
@@ -93,8 +110,9 @@ async function s3() {
   try {
     const { S3Client, PutObjectCommand, HeadObjectCommand } = await import('@aws-sdk/client-s3');
     const c = new S3Client({
-      region: 'auto',
+      region: process.env.CLOUDFLARE_R2_REGION ?? 'auto',
       endpoint: cfg.endpoint,
+      forcePathStyle: true,
       credentials: { accessKeyId: cfg.accessKeyId, secretAccessKey: cfg.secretAccessKey },
     });
     _s3 = {
@@ -113,7 +131,7 @@ async function s3() {
       endpoint: cfg.endpoint,
       accessKeyId: cfg.accessKeyId,
       secretAccessKey: cfg.secretAccessKey,
-      region: 'auto',
+      region: process.env.CLOUDFLARE_R2_REGION ?? 'auto',
       signatureVersion: 'v4',
       s3ForcePathStyle: true,
     });
@@ -143,9 +161,23 @@ const db = new pg.Client(
 );
 
 const isCloudinary = (u) => typeof u === 'string' && u.includes('res.cloudinary.com');
-const onCdn = (u) => typeof u === 'string' && u.startsWith(cdn());
-/** Flat key: folder_path is "/" for every row in this dataset. */
+// Tolerates a missing CLOUDFLARE_R2_PUBLIC_URL so read-only commands (preflight, the
+// report) work before any R2 config exists — nothing can be on the CDN yet anyway.
+const onCdn = (u) => {
+  const base = process.env.CLOUDFLARE_R2_PUBLIC_URL?.replace(/\/$/, '');
+  return Boolean(base) && typeof u === 'string' && u.startsWith(base);
+};
+/** Flat key — used for format variants, previews and content-only assets. */
 const keyFor = (hash, ext) => `${hash}${ext ?? ''}`;
+/**
+ * Parent object key, identical to the provider's getPathKey(file, pool=false):
+ * the Media Library folder path (e.g. "/3/7") becomes a key prefix, root has none.
+ */
+const parentKeyFor = (row) => {
+  const fp = row.folder_path;
+  const prefix = fp && fp !== '/' ? `${fp.replace(/^\//, '')}/` : '';
+  return `${prefix}${row.hash}${row.ext ?? ''}`;
+};
 const previewKeyFor = (hash) => `${hash}_preview.gif`;
 const cdnUrl = (key) => `${cdn()}/${key}`;
 
@@ -158,7 +190,7 @@ async function fetchWithRetry(url, tries = 4) {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const buf = Buffer.from(await res.arrayBuffer());
       if (buf.length === 0) throw new Error('empty body');
-      return buf;
+      return { buf, type: res.headers.get('content-type')?.split(';')[0] || undefined };
     } catch (e) {
       lastErr = e;
       await new Promise((r) => setTimeout(r, 500 * 2 ** i));
@@ -180,15 +212,27 @@ const parseJson = (v) => (v == null ? null : typeof v === 'string' ? JSON.parse(
 
 async function loadRows() {
   const { rows } = await db.query(
-    `SELECT id, name, hash, ext, mime, url, preview_url, formats, provider, provider_metadata, folder_path
+    `SELECT id, name, hash, ext, mime, size, url, preview_url, formats, provider, provider_metadata, folder_path
      FROM files ORDER BY id`
   );
   return rows;
 }
 
+/** Apply --ids / --limit to files rows. Without either flag, every row. */
+function selectRows(rows) {
+  let out = ONLY_IDS ? rows.filter((r) => ONLY_IDS.has(r.id)) : rows;
+  if (ONLY_IDS && out.length !== ONLY_IDS.size) {
+    const found = new Set(out.map((r) => r.id));
+    console.log(`⚠ --ids not found in files: ${[...ONLY_IDS].filter((i) => !found.has(i)).join(', ')}`);
+  }
+  if (LIMIT) out = out.filter((r) => isCloudinary(r.url)).slice(0, LIMIT);
+  if (ONLY_IDS || LIMIT) console.log(`scope: ${out.length} row(s) — ${out.map((r) => r.id).join(', ')}\n`);
+  return out;
+}
+
 /** Every object this row needs in R2: parent + each format variant + preview. */
 function planFor(row) {
-  const items = [{ kind: 'parent', key: keyFor(row.hash, row.ext), url: row.url, mime: row.mime }];
+  const items = [{ kind: 'parent', key: parentKeyFor(row), url: row.url, mime: row.mime }];
   const formats = parseJson(row.formats) || {};
   for (const [name, f] of Object.entries(formats)) {
     if (!f?.hash) continue;
@@ -227,6 +271,27 @@ async function preflight() {
     console.log('\nABORT: resolve collisions before migrating — two rows would overwrite one object.');
     process.exitCode = 1;
   }
+  const pending = rows.filter((r) => isCloudinary(r.url));
+  const inFolders = pending.filter((r) => r.folder_path && r.folder_path !== '/');
+  console.log(`rows inside Media Library folders: ${inFolders.length} (their parent keys carry the folder prefix)`);
+
+  // A small test set that exercises every code path, for the first --execute.
+  const pick = [];
+  const add = (label, r) => { if (r && !pick.some((p) => p.r.id === r.id)) pick.push({ label, r }); };
+  const fmtCount = (r) => Object.keys(parseJson(r.formats) || {}).length;
+  add('image with every size variant', [...pending].filter((r) => r.mime?.startsWith('image/')).sort((a, b) => fmtCount(b) - fmtCount(a))[0]);
+  add('video with a GIF preview', pending.find((r) => r.preview_url));
+  add('video without preview', pending.find((r) => r.mime?.startsWith('video/') && !r.preview_url));
+  add('non-media file (PDF etc.)', pending.find((r) => r.mime && !/^(image|video)\//.test(r.mime)));
+  add('file inside a folder', inFolders[0]);
+  add('large file (> 5 MB, multipart)', [...pending].sort((a, b) => Number(b.size) - Number(a.size)).find((r) => Number(r.size) > 5 * 1024));
+  add('small image, no variants', pending.find((r) => r.mime?.startsWith('image/') && fmtCount(r) === 0));
+  if (pick.length) {
+    console.log('\nsuggested test round (covers every code path):');
+    for (const { label, r } of pick) console.log(`  #${String(r.id).padEnd(6)} ${label.padEnd(32)} ${r.name}`);
+    console.log(`\n  npm run migrate:dry-run -- --ids=${pick.map((p) => p.r.id).join(',')}`);
+  }
+
   console.log(`\nprovider string that will be written: ${providerName()}`);
   console.log('Verify that against a Phase 1 test upload before running --execute.');
 }
@@ -242,14 +307,25 @@ async function migrateRow(row) {
     if (!it.url) continue;
     if (await existsInR2(it.key)) { uploaded.push({ ...it, reused: true }); continue; }
     if (!EXECUTE) { uploaded.push({ ...it, planned: true }); continue; }
-    const buf = await fetchWithRetry(it.url);
-    await putObject(it.key, buf, it.mime);
-    if (!(await existsInR2(it.key))) throw new Error(`post-upload HEAD failed for ${it.key}`);
-    uploaded.push({ ...it, bytes: buf.length, sha256: createHash('sha256').update(buf).digest('hex').slice(0, 16) });
+    let stage = 'download';
+    try {
+      const { buf, type } = await fetchWithRetry(it.url);
+      stage = 'upload';
+      await putObject(it.key, buf, it.mime || type);
+      stage = 'verify';
+      if (!(await existsInR2(it.key))) throw new Error(`post-upload HEAD failed for ${it.key}`);
+      uploaded.push({ ...it, bytes: buf.length, sha256: createHash('sha256').update(buf).digest('hex').slice(0, 16) });
+    } catch (e) {
+      e.stage = `${it.kind} ${stage} (${it.key})`;
+      throw e;
+    }
+    continue;
   }
 
   // Build the rewritten row. hash/ext/mime are deliberately untouched.
-  const formats = parseJson(row.formats);
+  // Deep copy: pg hands jsonb back as a live object, and row.formats is what the ledger
+  // records as "before". Mutating it in place made rollback restore the NEW variant URLs.
+  const formats = structuredClone(parseJson(row.formats));
   if (formats) {
     for (const f of Object.values(formats)) {
       if (!f?.hash) continue;
@@ -258,7 +334,7 @@ async function migrateRow(row) {
     }
   }
   const next = {
-    url: cdnUrl(keyFor(row.hash, row.ext)),
+    url: cdnUrl(parentKeyFor(row)),
     preview_url: row.preview_url ? cdnUrl(previewKeyFor(row.hash)) : null,
     formats: formats ? JSON.stringify(formats) : null,
     provider: providerName(),
@@ -281,13 +357,19 @@ async function migrateRow(row) {
   return { id: row.id, status: 'migrated', objects: uploaded.length };
 }
 
+/** aws-sdk v2 errors often have message === null; the useful part is in code/statusCode. */
+function describeError(e) {
+  return [e?.message, e?.code && `code=${e.code}`, e?.statusCode && `http=${e.statusCode}`, e?.stage && `at=${e.stage}`]
+    .filter(Boolean).join(' ') || String(e);
+}
+
 async function pool(items, worker, limit) {
   const results = []; let i = 0;
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
     while (i < items.length) {
       const idx = i++;
       try { results.push(await worker(items[idx])); }
-      catch (e) { results.push({ id: items[idx].id, status: 'failed', error: e.message }); }
+      catch (e) { results.push({ id: items[idx].id, status: 'failed', error: describeError(e) }); }
     }
   }));
   return results;
@@ -295,9 +377,14 @@ async function pool(items, worker, limit) {
 
 async function migrate() {
   if (!EXECUTE) console.log('DRY RUN — no downloads, uploads or DB writes. Re-run with --execute to apply.\n');
-  const rows = await loadRows();
+  const rows = selectRows(await loadRows());
   const results = await pool(rows, migrateRow, CONCURRENCY);
   const by = results.reduce((a, r) => ((a[r.status] = (a[r.status] || 0) + 1), a), {});
+  if (ONLY_IDS || LIMIT) {
+    for (const r of results) {
+      console.log(`  #${r.id} ${r.status}${r.objects ? ` (${r.objects} objects)` : ''}${r.next ? ` → ${r.next.url}` : ''}`);
+    }
+  }
   console.log('\nresult:', by);
   const failed = results.filter((r) => r.status === 'failed');
   if (failed.length) {
@@ -309,7 +396,7 @@ async function migrate() {
 }
 
 async function verify() {
-  const rows = await loadRows();
+  const rows = selectRows(await loadRows());
   let bad = 0, checked = 0;
   for (const row of rows) {
     const urls = [row.url, row.preview_url, ...Object.values(parseJson(row.formats) || {}).map((f) => f?.url)].filter(Boolean);
@@ -317,7 +404,12 @@ async function verify() {
       checked++;
       if (isCloudinary(u)) { console.log(`  #${row.id} STILL CLOUDINARY: ${u}`); bad++; continue; }
       const res = await fetch(u, { method: 'HEAD' });
-      if (!res.ok) { console.log(`  #${row.id} ${res.status} ${u}`); bad++; }
+      if (!res.ok) { console.log(`  #${row.id} ${res.status} ${u}`); bad++; continue; }
+      // A 200 served as octet-stream makes browsers download instead of render.
+      const type = res.headers.get('content-type') || '';
+      if (/octet-stream/.test(type) && /^(image|video)\//.test(row.mime || '')) {
+        console.log(`  #${row.id} WRONG TYPE (${type}) ${u}`); bad++;
+      }
     }
   }
   // A "no Cloudinary left" check alone would also pass on a 100% broken site,
@@ -328,13 +420,26 @@ async function verify() {
 
 async function rollback() {
   if (!existsSync(LEDGER)) throw new Error(`no ledger at ${LEDGER}`);
-  const entries = readFileSync(LEDGER, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
-  console.log(`${entries.length} ledger entries${EXECUTE ? '' : ' (dry run)'}`);
+  let entries = readFileSync(LEDGER, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  // --ids scopes to files rows; --table (+ --ids) scopes to content rows.
+  if (ONLY_TABLE) entries = entries.filter((e) => e.kind === 'content' && e.table === ONLY_TABLE && (!ONLY_IDS || ONLY_IDS.has(e.id)));
+  else if (ONLY_IDS) entries = entries.filter((e) => e.kind !== 'content' && ONLY_IDS.has(e.id));
+  const files = entries.filter((e) => e.kind !== 'content').length;
+  console.log(`${entries.length} ledger entries — ${files} files row(s), ${entries.length - files} content row(s)${EXECUTE ? '' : ' (dry run)'}`);
   if (!EXECUTE) return;
+  // Newest first, so a row migrated more than once ends at its very first "before".
   for (const e of entries.reverse()) {
+    if (e.kind === 'content') {
+      // Content entries share the ledger but describe another table entirely —
+      // replaying them against `files` would null out unrelated rows.
+      const cast = e.dataType === 'jsonb' || e.dataType === 'json' ? `::${e.dataType}` : '';
+      await db.query(`UPDATE "${e.table}" SET "${e.column}" = $1${cast} WHERE id = $2`, [e.before, e.id]);
+      continue;
+    }
     await db.query(
       `UPDATE files SET url=$1, preview_url=$2, formats=$3::jsonb, provider=$4, provider_metadata=$5::jsonb WHERE id=$6`,
-      [e.before.url, e.before.preview_url, e.before.formats, e.before.provider, e.before.provider_metadata, e.id]
+      [e.before.url, e.before.preview_url, e.before.formats == null ? null : JSON.stringify(parseJson(e.before.formats)),
+       e.before.provider, e.before.provider_metadata == null ? null : JSON.stringify(parseJson(e.before.provider_metadata)), e.id]
     );
   }
   console.log('rolled back (R2 objects left in place — harmless, and reused on re-run)');
@@ -349,8 +454,12 @@ async function rollback() {
  * Phase 2 and treat a large orphan count as a stop-and-investigate signal.
  */
 async function cloudinaryInventory() {
-  const cloud = env('CLOUDINARY_CLOUD_NAME');
-  const auth = Buffer.from(`${env('CLOUDINARY_API_KEY')}:${env('CLOUDINARY_API_SECRET')}`).toString('base64');
+  // Falls back to the names Strapi's own Cloudinary provider uses, which the Coolify
+  // container already has — so nothing needs typing inline.
+  const cloud = env('CLOUDINARY_CLOUD_NAME', process.env.CLOUDINARY_NAME);
+  const auth = Buffer.from(
+    `${env('CLOUDINARY_API_KEY', process.env.CLOUDINARY_KEY)}:${env('CLOUDINARY_API_SECRET', process.env.CLOUDINARY_SECRET)}`
+  ).toString('base64');
   const all = new Map(); // public_id -> {type, bytes}
   for (const type of ['image', 'video', 'raw']) {
     let cursor;
@@ -421,7 +530,7 @@ async function reconcile() {
 const COMMANDS = { reconcile, 'content-scan': contentScan, 'content-migrate': contentMigrate, preflight, migrate, verify, rollback };
 if (!COMMANDS[cmd]) {
   // Validate before connecting, so `--help` / a typo doesn't surface as a DB error.
-  console.log('usage: node scripts/migrate-cloudinary-to-r2.mjs <command> [--execute]\n');
+  console.log('usage: node scripts/migrate-cloudinary-to-r2.mjs <command> [--execute] [--ids=1,2] [--limit=N] [--table=name]\n');
   console.log('  reconcile     Cloudinary inventory vs DB (read-only; needs DB + CLOUDINARY_* only)');
   console.log('  content-scan  find Cloudinary URLs pasted into content (read-only; DB only)');
   console.log('  content-migrate  Phase 3: rewrite content URLs (dry run unless --execute)');
@@ -463,6 +572,7 @@ async function contentScan() {
 
   const hits = [];      // { table, column, id, publicId, backed }
   const scanned = new Set();
+  const unscannable = []; // has Cloudinary URLs but no id column — content-migrate can't rewrite it
   for (const { table_name: t, column_name: c } of cols) {
     let res;
     try {
@@ -470,12 +580,16 @@ async function contentScan() {
         `SELECT id, "${c}"::text AS v FROM "${t}" WHERE "${c}"::text LIKE '%res.cloudinary.com%'`
       );
     } catch {
-      continue; // table without an id column, view, etc.
+      // No id column (join/link tables). Never skip silently: count what we can't reach.
+      const n = await db.query(`SELECT count(*)::int AS n FROM "${t}" WHERE "${c}"::text LIKE '%res.cloudinary.com%'`)
+        .then((r) => r.rows[0].n).catch(() => 0);
+      if (n) unscannable.push(`${t}.${c} (${n} row${n > 1 ? 's' : ''})`);
+      continue;
     }
     if (res.rows.length) scanned.add(`${t}.${c}`);
     for (const row of res.rows) {
-      for (const m of row.v.matchAll(/res\.cloudinary\.com\/[^/]+\/(?:image|video|raw)\/upload\/(?:[^/"'\s]+\/)*?([A-Za-z0-9_\-]+)\.[A-Za-z0-9]+/g)) {
-        hits.push({ table: t, column: c, id: row.id, publicId: m[1], backed: known.has(m[1]) });
+      for (const m of row.v.matchAll(CONTENT_URL_RE)) {
+        hits.push({ table: t, column: c, id: row.id, publicId: m[2], backed: known.has(m[2]) });
       }
     }
   }
@@ -496,23 +610,35 @@ async function contentScan() {
   if (unbacked.length) {
     writeFileSync('content-unbacked.txt',
       unbacked.map((h) => `${h.table}.${h.column} row=${h.id} ${h.publicId}`).join('\n'));
-    console.log('\n✖ These will 404 when Cloudinary is cancelled — no files row means no migration.');
-    console.log('  Either re-upload them through the Media Library, or edit the content.');
+    console.log('\n✖ No files row, so `migrate` never copies these. `content-migrate` copies them');
+    console.log('  itself — but only while Cloudinary is still up, so run it before cancelling.');
     console.log('  Full list: content-unbacked.txt. Sample:');
     for (const h of unbacked.slice(0, 10)) console.log(`    ${h.table}.${h.column} row=${h.id}  ${h.publicId}`);
   } else {
     console.log('\n✔ Every Cloudinary URL in content is backed by a files row.');
     console.log('  Orphans in Cloudinary are unreferenced and safe to abandon at cancellation.');
   }
+  if (unscannable.length) {
+    console.log('\n⚠ Cloudinary URLs in tables WITHOUT an id column (not rewritten by content-migrate):');
+    for (const u of unscannable) console.log(`    ${u}`);
+    console.log('  Check these by hand before cancelling.');
+    process.exitCode = 1;
+  }
+  console.log('\nNote: only the database is scanned. URLs hard-coded in frontend source code');
+  console.log('(e.g. the logo in zds-client BubbleTeamLayout.svelte) must be updated separately.');
 }
 
-/** Every Cloudinary URL in content, with the R2 key it maps to. */
+/**
+ * A Cloudinary delivery URL embedded in content:
+ *   https://res.cloudinary.com/<cloud>/<image|video|raw>/upload/[<transforms>/][v123/]<public_id>.<ext>
+ * Group 1 = the segments between /upload/ and the public_id, 2 = public_id, 3 = ext.
+ */
 const CONTENT_URL_RE =
-  /https?:\/\/res\.cloudinary\.com\/[^/]+\/(?:image|video|raw)\/upload\/(?:[^/"'\s]+\/)*?([A-Za-z0-9_\-]+)(\.[A-Za-z0-9]+)/g;
+  /https?:\/\/res\.cloudinary\.com\/[^/]+\/(?:image|video|raw)\/upload\/((?:[^/"'\s]+\/)*?)([A-Za-z0-9_\-]+)(\.[A-Za-z0-9]+)/g;
 
 async function contentColumns() {
   const { rows } = await db.query(`
-    SELECT c.table_name, c.column_name
+    SELECT c.table_name, c.column_name, c.data_type
     FROM information_schema.columns c
     JOIN information_schema.tables t
       ON t.table_name = c.table_name AND t.table_schema = c.table_schema
@@ -520,66 +646,118 @@ async function contentColumns() {
       AND c.table_name <> 'files'
       AND c.data_type IN ('text','character varying','jsonb','json')
     ORDER BY c.table_name, c.column_name`);
-  return rows;
+  return rows.filter((r) => !ONLY_TABLE || r.table_name === ONLY_TABLE);
+}
+
+/** public_id → the R2 key `migrate` writes for it. */
+function keyIndex(rows) {
+  const idx = new Map();
+  for (const row of rows) {
+    const pm = parseJson(row.provider_metadata);
+    idx.set(pm?.public_id ?? row.hash, parentKeyFor(row));
+    for (const f of Object.values(parseJson(row.formats) || {})) {
+      if (!f?.hash) continue;
+      const fpm = parseJson(f.provider_metadata);
+      idx.set(fpm?.public_id ?? f.hash, keyFor(f.hash, f.ext));
+    }
+  }
+  return idx;
+}
+
+/**
+ * Where one embedded URL should point after migration.
+ *  - plain URL of an asset that has a files row → the object `migrate` created for it
+ *  - anything else → the exact bytes Cloudinary serves at that URL, copied to their own
+ *    key. That covers assets with no files row, and transformed URLs (w_500/, c_scale,…),
+ *    which must never share a key with the original or they would overwrite it.
+ */
+function contentTarget(full, segments, publicId, ext, idx) {
+  const transformed = segments.split('/').filter(Boolean).some((seg) => !/^v\d+$/.test(seg));
+  const mapped = idx.get(publicId);
+  if (mapped && !transformed && mapped.endsWith(ext)) return { key: mapped, copy: false };
+  if (!mapped && !transformed) return { key: `${publicId}${ext}`, copy: true, why: 'no files row' };
+  const tag = createHash('sha1').update(full).digest('hex').slice(0, 12);
+  return { key: `derived/${tag}/${publicId}${ext}`, copy: true, why: transformed ? 'transformed URL' : 'extension differs from stored file' };
 }
 
 /**
  * Phase 3 — rewrite Cloudinary URLs embedded in content.
  *
- * Every URL maps to `${CDN}/<public_id><ext>`, which is the same key `migrate` uses for
- * files (public_id === hash for this dataset). URLs whose asset has no `files` row are
- * copied to R2 here, since `migrate` would never see them.
+ * A row is rewritten only when EVERY object its URLs will point at exists in R2, so a
+ * partial run (a test round, or content before files) can never leave a page linking to
+ * a missing object — those rows are reported as blocked and left on Cloudinary.
  */
 async function contentMigrate() {
   if (!EXECUTE) console.log('DRY RUN — no uploads or DB writes. Re-run with --execute to apply.\n');
-  const known = new Set(dbPublicIds(await loadRows()).keys());
+  const idx = keyIndex(await loadRows());
   const cols = await contentColumns();
+  if (ONLY_TABLE && !cols.length) throw new Error(`no text columns found for --table=${ONLY_TABLE}`);
 
-  let rewritten = 0, urls = 0, copied = 0;
+  let rewritten = 0, urls = 0, copied = 0, blocked = 0;
   const copiedKeys = new Set();
+  const present = new Map(); // key -> bool, cached HEADs
 
-  for (const { table_name: t, column_name: c } of cols) {
+  const inR2 = async (key) => {
+    if (copiedKeys.has(key)) return true;
+    if (!present.has(key)) present.set(key, await existsInR2(key));
+    return present.get(key);
+  };
+
+  for (const { table_name: t, column_name: c, data_type: dt } of cols) {
     let res;
     try {
       res = await db.query(`SELECT id, "${c}"::text AS v FROM "${t}" WHERE "${c}"::text LIKE '%res.cloudinary.com%'`);
     } catch { continue; }
 
     for (const row of res.rows) {
+      if (ONLY_TABLE && ONLY_IDS && !ONLY_IDS.has(row.id)) continue;
       const matches = [...row.v.matchAll(CONTENT_URL_RE)];
       if (!matches.length) continue;
       urls += matches.length;
 
-      // Anything without a files row must be copied now, while Cloudinary is still up.
-      for (const m of matches) {
-        const [full, publicId, ext] = m;
-        const key = `${publicId}${ext}`;
-        if (known.has(publicId) || copiedKeys.has(key)) continue;
-        if (!EXECUTE) { console.log(`  would copy unbacked: ${key}  (${t}.${c} row=${row.id})`); copiedKeys.add(key); copied++; continue; }
-        if (!(await existsInR2(key))) {
-          const buf = await fetchWithRetry(full);
-          await putObject(key, buf, undefined); // ext drives the browser; R2 needs a type
-          if (!(await existsInR2(key))) throw new Error(`post-upload HEAD failed for ${key}`);
-        }
-        copiedKeys.add(key); copied++;
-        console.log(`  copied unbacked: ${key}`);
+      const targets = matches.map(([full, seg, publicId, ext]) => ({ full, ...contentTarget(full, seg, publicId, ext, idx) }));
+
+      // Objects `migrate` is responsible for must already be there.
+      const missing = [];
+      for (const tg of targets) if (!tg.copy && !(await inR2(tg.key))) missing.push(tg.key);
+      if (missing.length) {
+        blocked++;
+        console.log(`  blocked ${t}.${c} row=${row.id}: ${missing.length} file(s) not migrated yet (${missing.slice(0, 3).join(', ')}${missing.length > 3 ? ', …' : ''})`);
+        continue;
       }
 
-      const next = row.v.replace(CONTENT_URL_RE, (_f, publicId, ext) => `${cdn()}/${publicId}${ext}`);
+      // Everything else is copied now, while Cloudinary is still up.
+      for (const tg of targets) {
+        if (!tg.copy || copiedKeys.has(tg.key)) continue;
+        if (!EXECUTE) { console.log(`  would copy (${tg.why}): ${tg.key}  ← ${t}.${c} row=${row.id}`); copiedKeys.add(tg.key); copied++; continue; }
+        if (!(await inR2(tg.key))) {
+          const { buf, type } = await fetchWithRetry(tg.full);
+          await putObject(tg.key, buf, type);
+          if (!(await existsInR2(tg.key))) throw new Error(`post-upload HEAD failed for ${tg.key}`);
+        }
+        copiedKeys.add(tg.key); copied++;
+        console.log(`  copied (${tg.why}): ${tg.key}`);
+      }
+
+      let i = 0;
+      const next = row.v.replace(CONTENT_URL_RE, () => cdnUrl(targets[i++].key));
       if (next === row.v) continue;
 
-      if (!EXECUTE) { rewritten++; continue; }
+      if (!EXECUTE) { rewritten++; console.log(`  would rewrite ${t}.${c} row=${row.id} (${matches.length} URL(s))`); continue; }
       appendFileSync(LEDGER, JSON.stringify({
-        kind: 'content', table: t, column: c, id: row.id, at: new Date().toISOString(), before: row.v,
+        kind: 'content', table: t, column: c, dataType: dt, id: row.id, at: new Date().toISOString(), before: row.v,
       }) + '\n');
-      await db.query(`UPDATE "${t}" SET "${c}" = $1::jsonb WHERE id = $2`, [next, row.id])
-        .catch(() => db.query(`UPDATE "${t}" SET "${c}" = $1 WHERE id = $2`, [next, row.id]));
+      const cast = dt === 'jsonb' || dt === 'json' ? `::${dt}` : '';
+      await db.query(`UPDATE "${t}" SET "${c}" = $1${cast} WHERE id = $2`, [next, row.id]);
       rewritten++;
     }
   }
 
-  console.log(`\nCloudinary URLs in content : ${urls}`);
-  console.log(`unbacked assets copied     : ${copied}`);
-  console.log(`rows ${EXECUTE ? 'rewritten' : 'that would be rewritten'} : ${rewritten}`);
+  console.log(`\nCloudinary URLs in scope  : ${urls}`);
+  console.log(`objects ${EXECUTE ? 'copied' : 'to copy'}            : ${copied}`);
+  console.log(`rows ${EXECUTE ? 'rewritten' : 'to rewrite'}           : ${rewritten}`);
+  console.log(`rows blocked (files first): ${blocked}`);
+  if (blocked) process.exitCode = EXECUTE ? 1 : 0;
   if (EXECUTE) console.log(`ledger: ${LEDGER}`);
 }
 
