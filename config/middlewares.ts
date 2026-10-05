@@ -13,6 +13,7 @@ export default [
             "blob:",
             "market-assets.strapi.io",
             "res.cloudinary.com",
+            "cdn.zerodesignstudios.com",
           ],
           "media-src": [
             "'self'",
@@ -20,6 +21,7 @@ export default [
             "blob:",
             "market-assets.strapi.io",
             "res.cloudinary.com",
+            "cdn.zerodesignstudios.com",
           ],
           upgradeInsecureRequests: null,
         },
