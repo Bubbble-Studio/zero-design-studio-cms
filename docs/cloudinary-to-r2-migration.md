@@ -98,7 +98,9 @@ If that count is **0**, the 215 orphans are genuinely unreferenced and can be ab
 - Production is **PostgreSQL** on Railway — `config/database.ts` merely *defaults* to sqlite.
 - `files` columns: `url`, `preview_url`, `formats` (jsonb), `provider`, `provider_metadata`
   (jsonb), `hash`, `ext`, `mime`, `folder_path`.
-- R2 keys are flat `<hash><ext>`; `preflight` reports **0 collisions** on live data.
+- R2 keys mirror the provider exactly: the parent object is `<folder_path>/<hash><ext>` (no
+  prefix for files at the Media Library root), size variants are flat `<hash><ext>`. See
+  [Key scheme](#key-scheme). `preflight` reports collisions and how many rows sit in folders.
 - Cloudinary `public_id` equals the Strapi `hash` (variants are `<variant>_<hash>`).
 
 **Cost stays negligible** — even at a few GB, R2 is $0.015/GB-month with free egress.
@@ -137,26 +139,39 @@ by hand.)
 ### 2. Open a shell in the container
 Coolify → the Strapi application → **Terminal**.
 
-### 3. Reconcile (read-only, safe on production)
+### 3. Get current numbers (read-only, safe on production)
 ```bash
-CLOUDINARY_CLOUD_NAME=dccjqha6a \
-CLOUDINARY_API_KEY=xxx \
-CLOUDINARY_API_SECRET=xxx \
-npm run migrate:reconcile
+npm run migrate:report
 ```
-Key and secret: Cloudinary Console → Settings → Access Keys.
+Runs `reconcile`, `content-scan` and `preflight` back to back. Nothing needs passing inline:
+`reconcile` falls back to the `CLOUDINARY_NAME` / `CLOUDINARY_KEY` / `CLOUDINARY_SECRET`
+variables the container already has for Strapi's own Cloudinary provider. Re-run it any time —
+the August figures below are a snapshot, and every upload since changes them.
 
 All commands are npm scripts:
 
 | Command | Writes? | Needs |
 |---|---|---|
-| `npm run migrate:reconcile` | no | DB + `CLOUDINARY_*` |
+| `npm run migrate:report` | no | DB + Cloudinary vars (already in the container) |
+| `npm run migrate:reconcile` | no | DB + Cloudinary vars |
 | `npm run migrate:content-scan` | no | DB only |
-| `npm run migrate:preflight` | no | DB + `CLOUDFLARE_R2_PUBLIC_URL` |
+| `npm run migrate:preflight` | no | DB only |
 | `npm run migrate:dry-run` | no | DB + `CLOUDFLARE_R2_*` |
-| `npm run migrate:execute` | **YES** | DB + `CLOUDFLARE_R2_*` + `NEW_PROVIDER_NAME` |
+| `npm run migrate:execute` | **YES** | DB + `CLOUDFLARE_R2_*` |
 | `npm run migrate:verify` | no | DB |
+| `npm run migrate:content-dry-run` | no | DB + `CLOUDFLARE_R2_*` |
+| `npm run migrate:content-execute` | **YES** | DB + `CLOUDFLARE_R2_*` |
 | `npm run migrate:rollback` | **YES** | DB + the ledger file |
+
+**Scoping, for test rounds.** Append flags after `--`:
+
+| Flag | Applies to | Effect |
+|---|---|---|
+| `--ids=12,57,301` | migrate, verify, rollback | only these `files` rows |
+| `--limit=10` | migrate, verify | the first N rows still on Cloudinary |
+| `--table=works --ids=51` | content-migrate, rollback | only these rows of one content table |
+
+e.g. `npm run migrate:execute -- --ids=12,57,301`.
 
 It writes `reconcile-orphans.txt` and `reconcile-missing.txt` into the working directory. A
 container filesystem is ephemeral, so read them before the next deploy:
@@ -166,21 +181,19 @@ head -50 reconcile-orphans.txt
 ```
 
 ### 4. Later phases
-`migrate:preflight` and `migrate:verify` are also read-only. `migrate:execute` writes — take a
-`pg_dump` first and run it against a restored copy before production. `migrate` additionally needs the
-`CLOUDFLARE_R2_*` variables and `NEW_PROVIDER_NAME`.
+`migrate:preflight` and `migrate:verify` are also read-only. Before the first `--execute`, take
+a database backup (Coolify → the database → Backups), then start with the
+[test round](#test-round-between-phase-1-and-phase-2) — a few rows, checked on the real site,
+undone with one command if anything looks wrong. `NEW_PROVIDER_NAME` is optional: it defaults to
+`strapi-provider-cloudflare-r2`, the string Strapi itself writes with this config.
 
-**No S3 SDK is declared as a dependency, deliberately.** Adding one desyncs
-`package-lock.json`, and the nixpacks build runs `npm ci`, which hard-fails on any
-mismatch — that is exactly how the 2026-08-26 deploy broke. The script instead uses
-whichever SDK is already present: `@aws-sdk/client-s3` (v3) if installed, otherwise
-`aws-sdk` (v2), which `strapi-provider-cloudflare-r2` brings in during Phase 1. If you
-need to run `migrate` before Phase 1, install one ad-hoc in the container:
-```bash
-npm i --no-save @aws-sdk/client-s3
-```
-If you ever *do* add a dependency to this repo, run `npm install` and commit the updated
-`package-lock.json` in the same commit.
+**The S3 SDK comes with the Phase 1 provider.** `strapi-provider-cloudflare-r2` depends on
+`aws-sdk` (v2), and the script uses it — no separate install. (`@aws-sdk/client-s3` v3 is used
+instead if present.)
+
+If you ever add a dependency to this repo, commit the regenerated `package-lock.json` **in the
+same commit**: the nixpacks build runs `npm ci`, which hard-fails on any mismatch — that is
+exactly how the 2026-08-26 deploy broke.
 
 > **Careful with the DB in this repo's `.env`.** It points at a Railway instance
 > (`viaduct.proxy.rlwy.net`) that is publicly reachable but had **no writes for roughly a
@@ -196,13 +209,10 @@ If you ever *do* add a dependency to this repo, run `npm install` and commit the
 0.2 **Identify what is actually driving the bill** — storage, bandwidth, or transformations.
     If it is bandwidth, R2's zero-egress pricing removes it entirely.
 
-0.3 **Re-verify no transformations are used**, across *every* content type, not just a sample:
-```bash
-# expect: no output
-curl -s "$API/<collection>?populate=*&pagination[pageSize]=100" \
-  | grep -oE "res\.cloudinary\.com/[^\"]*upload/[^\"/]*" | grep -E "/(w_|c_|q_|f_|dpr_)"
-```
-    If any are found, stop and reconsider Cloudflare Images for those assets.
+0.3 **Transformations are handled.** Transformed URLs found in content (`w_500/`, `c_scale,…`)
+    are copied as the exact rendered bytes to their own `derived/<id>/` key by
+    `content-migrate`, so they can never overwrite an original. Video preview GIFs are likewise
+    copied as rendered. Nothing needs re-generating.
 
 0.4 **Create the R2 bucket** (e.g. `zds-media`) and an API token with Object Read & Write.
 
@@ -215,88 +225,103 @@ curl -s "$API/<collection>?populate=*&pagination[pageSize]=100" \
 
 ## Phase 1 — Switch the provider (new uploads → R2)
 
-Stops the bleeding immediately. Existing assets keep serving from Cloudinary, so this is
-independently deployable and reversible.
+Stops the bill growing. Existing assets keep serving from Cloudinary, so this is independently
+deployable and reversible. **Shipped in the `feat/r2-upload-provider` PR**, behind a switch:
+merging and deploying it changes nothing until `UPLOAD_PROVIDER=r2` is set.
 
-### 1.1 Dependencies — provider choice is RESOLVED
+### 1.1 Dependency
+`strapi-provider-cloudflare-r2@0.3.0` (exact pin), with the lock file regenerated in the same
+commit and `npm ci --dry-run` verified. It brings `aws-sdk` v2, which the migration script uses
+too.
 
-**Do not use `strapi-provider-cloudflare-r2-aws`** (the package the store uses). Every published
-version declares `peerDependencies: { "@strapi/strapi": ">=5.0.0" }`, so it will not install
-against Strapi 4.13.1. Use its Strapi-4-compatible sibling:
-
-```bash
-npm install strapi-provider-cloudflare-r2@0.3.0
-# keep @strapi/provider-upload-cloudinary installed until Phase 4 — see rollback
-```
-
-> **Fallback, if needed:** `@strapi/provider-upload-aws-s3@^4` also works against R2, but **not
-> out of the box** — it sends `ACL: 'public-read'` on every PutObject and **R2 does not implement
-> S3 ACLs**, so uploads fail with `NotImplemented`. You must pass `ACL: null` explicitly
-> (`undefined` or omitting it does *not* work — the provider defaults it back to `public-read`;
-> and `ACL: 'private'` makes Strapi sign URLs, defeating the public CDN). Full shape:
-> ```ts
-> providerOptions: {
->   baseUrl: 'https://cdn.zerodesignstudios.com',  // no trailing slash
->   s3Options: {
->     credentials: { accessKeyId, secretAccessKey },
->     region: 'auto',
->     endpoint: 'https://<account-id>.r2.cloudflarestorage.com',
->     forcePathStyle: true,
->     params: { Bucket, ACL: null },
->   },
-> }
-> ```
-> Note `rootPath` is a key prefix, not a URL — it is not a substitute for `baseUrl`.
-
-**`pool: false` is mandatory** with `strapi-provider-cloudflare-r2`: its `delete()` always uses
-the folderPath-prefixed key, so `pool: true` would make deletions silently no-op and orphan
-objects. (In the store's `-aws` package `pool` is ignored entirely — another reason that config
-does not transfer verbatim.)
+- **Not `strapi-provider-cloudflare-r2-aws`** (the store's package): it requires Strapi ≥ 5.
+- **Not `@strapi/provider-upload-aws-s3`**: it sends `ACL: public-read`, which R2 rejects.
 
 ### 1.2 `config/plugins.ts`
-Replace the `upload` block (leave `email`, `ezforms`, `seo` untouched):
-```ts
-upload: {
-  config: {
-    provider: 'strapi-provider-cloudflare-r2-aws',
-    providerOptions: {
-      credentials: {
-        accessKeyId: env('CLOUDFLARE_R2_ACCESS_KEY_ID'),
-        secretAccessKey: env('CLOUDFLARE_R2_SECRET_ACCESS_KEY'),
-      },
-      endpoint: env('CLOUDFLARE_R2_ENDPOINT'),
-      params: { Bucket: env('CLOUDFLARE_R2_BUCKET') },
-      // Stores the CDN URL instead of the R2 endpoint URL. Required for >5MB uploads.
-      cloudflarePublicAccessUrl: env('CLOUDFLARE_R2_PUBLIC_URL'),
-      pool: false,
-    },
-    actionOptions: { upload: {}, uploadStream: {}, delete: {} },
-  },
-},
-```
+Done in the PR. Points worth knowing, all verified against the provider's source:
 
-### 1.3 Environment variables
+- **Credentials are flat** (`accessKeyId`, `secretAccessKey`) — the provider spreads its options
+  straight into `new AWS.S3(...)`. An earlier draft of this runbook nested them under
+  `credentials`, which would not have worked.
+- **`pool: false` is required.** With `false` the parent key keeps the Media Library folder
+  prefix, and `delete()` *always* computes the folder-prefixed key whatever `pool` says — so
+  `pool: true` would upload flat keys and every Media Library delete would silently miss.
+- `s3ForcePathStyle: true` (the same addressing the script uses, so a script test round also
+  proves the provider's connection settings), `signatureVersion: "v4"`, and a bound
+  `CacheControl: public, max-age=31536000, immutable`. aws-sdk v2 only binds a param to
+  operations that accept it, so deletes are unaffected — tested.
+- If `UPLOAD_PROVIDER=r2` is set but any R2 variable is missing, it **logs an error and stays on
+  Cloudinary** rather than crashing: a boot failure would take the public site's API down.
+
+### 1.3 Cloudflare setup (before flipping the switch)
+1. R2 → **Create bucket** `zds-media`.
+2. Bucket → Settings → **Custom Domains** → `cdn.zerodesignstudios.com` (Cloudflare adds DNS).
+3. R2 → **Manage API tokens** → a token with *Object Read & Write* on that bucket only.
+4. Upload any file by hand in the dashboard and open
+   `https://cdn.zerodesignstudios.com/<that file>`. It must load **before** step 1.4 —
+   otherwise every upload after the flip stores a URL that 404s.
+
+### 1.4 Environment variables (Coolify → the Strapi app → Environment Variables)
 ```
 CLOUDFLARE_R2_ACCESS_KEY_ID=...
 CLOUDFLARE_R2_SECRET_ACCESS_KEY=...
 CLOUDFLARE_R2_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com
 CLOUDFLARE_R2_BUCKET=zds-media
 CLOUDFLARE_R2_PUBLIC_URL=https://cdn.zerodesignstudios.com
+UPLOAD_PROVIDER=r2          # the switch — set it last
+```
+Redeploy. Keep the `CLOUDINARY_*` variables: they are the rollback, and `reconcile` uses them.
+
+### 1.5 CSP
+Done in the PR: `cdn.zerodesignstudios.com` is in `img-src` and `media-src`.
+`res.cloudinary.com` stays until Phase 4.
+
+### 1.6 Verify
+1. Strapi admin → Media Library → upload a test image.
+2. Its URL must start with `https://cdn.zerodesignstudios.com/` and it must render in the admin.
+   Still on `res.cloudinary.com`? Look for `[upload] UPLOAD_PROVIDER=r2 but … not set` in the
+   container logs.
+3. Optional: `SELECT provider FROM files ORDER BY id DESC LIMIT 1` must read
+   `strapi-provider-cloudflare-r2`, the string the migration script writes. (Strapi stores
+   `config.provider` verbatim — confirmed in `@strapi/plugin-upload@4.13.1`.)
+4. Delete the test image and confirm it disappears from the bucket.
+
+---
+
+## Test round (between Phase 1 and Phase 2)
+
+Migrate a handful of files, look at them on the real site, then decide.
+
+```bash
+npm run migrate:report                             # fresh numbers + a suggested test set
+npm run migrate:dry-run  -- --ids=<suggested ids>  # writes nothing
+npm run migrate:execute  -- --ids=<suggested ids>
+npm run migrate:verify   -- --ids=<suggested ids>  # every URL must be a real 200
 ```
 
-### 1.4 `config/middlewares.ts` — CSP
-Add the new host to **both** `img-src` and `media-src`, and **keep `res.cloudinary.com`
-until Phase 2 is complete and verified**:
-```ts
-"img-src":   ["'self'", "data:", "blob:", "market-assets.strapi.io",
-              "res.cloudinary.com", "cdn.zerodesignstudios.com"],
-"media-src": ["'self'", "data:", "blob:", "market-assets.strapi.io",
-              "res.cloudinary.com", "cdn.zerodesignstudios.com"],
-```
+`preflight` (part of the report) suggests ids covering every code path: an image with all size
+variants, a video with its GIF preview, a non-media file, a file inside a Media Library folder,
+and a large file. Then:
 
-### 1.5 Verify
-Deploy, upload a test image in Strapi admin, confirm its URL is on
-`cdn.zerodesignstudios.com` and renders on the site.
+- Open them in the Media Library — previews render, URLs are on `cdn.`.
+- Open a page on zerodesignstudios.com that uses one of them.
+- Delete one *test* file through the Media Library and confirm it leaves the bucket. This is the
+  check that the script's keys match the provider's.
+
+Content can be test-migrated one row at a time:
+```bash
+npm run migrate:content-dry-run  -- --table=works --ids=51
+npm run migrate:content-execute  -- --table=works --ids=51
+```
+A content row is only rewritten once **every** object it links to is in R2; otherwise it is
+reported as *blocked* and left untouched. Running content before its files is therefore safe —
+it just does nothing yet.
+
+**Undo a test round:** `npm run migrate:rollback -- --ids=<same ids>` (content:
+`-- --table=works --ids=51`). R2 objects stay in place and are reused next time.
+
+A separate ledger per round keeps things tidy: `MIGRATION_LEDGER=round1.jsonl npm run …`. The
+ledger lives on the container's filesystem — copy it out before the next redeploy.
 
 ---
 
@@ -322,10 +347,13 @@ For each row in the `files` table:
    **Do NOT touch `hash`, `ext`, or `mime`.** The provider recomputes the R2 object key from
    `hash`+`ext` on every read *and delete* — "normalising" them orphans objects permanently.
 
+<a id="key-scheme"></a>
 **Object keys must match what the provider generates for new uploads**, or the Media Library's
 delete button will silently no-op. With `strapi-provider-cloudflare-r2` + `pool: false` the
 parent file key is `<folderPath sans leading slash>/<hash><ext>` while format variants live at
-`<hash><ext>` in the bucket root — the asymmetry is real and must be reproduced. Write the
+`<hash><ext>` in the bucket root — the asymmetry is real and must be reproduced. The script
+does (`parentKeyFor` / `keyFor`); an earlier version wrote flat keys for everything, which is
+only correct while every row sits at the Media Library root. Write the
 key-derivation rule down explicitly, and run a **pre-flight collision report** across all rows
 and all format variants; **abort on any collision** rather than resolving it at runtime.
 
@@ -349,10 +377,20 @@ which then break the day the account is cancelled.
 **The script is written:** `scripts/migrate-cloudinary-to-r2.mjs`
 (`preflight` | `migrate` | `verify` | `rollback`; writes nothing without `--execute`).
 It is idempotent, resumable, bounded-concurrency, and ledgers every row before rewriting it.
-Its key-derivation logic was exercised offline against the 307 rows in the (stale) dump and
-produced 1,386 unique keys with no collisions — that is a **logic check only, not an
-inventory**. `preflight` re-runs the same collision check against production, which is the
-result that counts.
+**Tested end to end (2026-10-05)** against a local Postgres seeded with real production file
+records (from the public API) and an S3-compatible bucket, downloading the real assets from
+Cloudinary — including a 29 MB video with its GIF preview, a file in a Media Library folder,
+content with a transformed URL, a URL with no files row, and JSON content:
+
+- migrate → content-migrate → verify (17 URLs, 0 bad) → rollback, twice from a clean slate:
+  **every row byte-identical** to the pre-test snapshot afterwards
+- a scoped test round (`--ids`), scoped rollback, and re-migration of a rolled-back row
+- the real `strapi-provider-cloudflare-r2` with this repo's config: uploads in and out of
+  folders, a 12 MB multipart upload, and **`delete()` removing objects the script created**
+
+That run found and fixed two bugs present since August. Rollback restored only the parent URL
+and left every size variant on R2, because the "before" copy was mutated in place. And rollback
+replayed content-ledger entries against `files`, which would have nulled out unrelated rows.
 
 **Do not delete anything from Cloudinary in this phase.** It is the rollback.
 
@@ -368,6 +406,8 @@ Cloudinary URLs also live outside the `files` table:
   **draft *and* published copies**, **`components_*` tables** (e.g. `components_elements_faq_items`)
   and **i18n locale copies** — all of which need the same sweep, using the *same* key map as
   Phase 2.
+- **Tables without an `id` column** (join/link tables) can't be rewritten by `content-migrate`.
+  `content-scan` lists any that contain Cloudinary URLs and exits non-zero — check them by hand.
 - **Hardcoded in the frontend** — confirmed: `zds-client`
   `src/lib/components/BubbleTeamLayout.svelte:94` pins the ZDS logo to
   `https://res.cloudinary.com/dccjqha6a/image/upload/v1701106728/zds_logo_ef2db07d5b.png`.
@@ -415,8 +455,8 @@ would have been keeping the account alive on the free tier.
 
 | Phase | Rollback |
 |---|---|
-| 1 | Revert the `plugins.ts` commit and redeploy. Assets uploaded to R2 in the meantime need re-pointing. |
-| 2 | Replay the **row-level ledger** (original `url`/`formats`/`preview_url`/`provider_metadata` dumped before each rewrite). ⚠️ Restoring the whole DB backup instead would discard every content edit made since — on a live CMS that is a second incident, not a rollback. Cloudinary still holds every original. |
+| 1 | Set `UPLOAD_PROVIDER=cloudinary` (or remove it) and redeploy. Files uploaded to R2 meanwhile keep working — each row stores its absolute URL — but while the switch is off, deleting one in Strapi won't remove its R2 object (Strapi only calls the provider whose name matches the row). |
+| 2 | `npm run migrate:rollback` replays the **row-level ledger** (original `url`/`formats`/`preview_url`/`provider_metadata` dumped before each rewrite). ⚠️ Restoring the whole DB backup instead would discard every content edit made since — on a live CMS that is a second incident, not a rollback. Cloudinary still holds every original. |
 | 4 | Do not cancel Cloudinary until the grace period passes. |
 
 ## Open items
@@ -425,7 +465,8 @@ would have been keeping the account alive on the free tier.
 - [ ] **Triage the 215 orphans** — run `migrate:content-scan`; if nothing unbacked turns up
       they are unreferenced and safe to abandon
 - [x] ~~Triage missing~~ → **0 missing**; nothing on the site is broken today
-- [ ] Re-confirm `folder_path` is still `/` for all rows (affects R2 key derivation)
+- [x] ~~Re-confirm `folder_path` is `/` for all rows~~ → no longer matters: the script derives
+      folder-prefixed keys exactly like the provider; `preflight` reports how many rows are in folders
 - [x] ~~Confirm provider supports Strapi 4.13~~ → resolved: use `strapi-provider-cloudflare-r2@0.3.0`
 - [x] ~~Confirm zero transformation URLs~~ → resolved: **4 video preview GIFs DO use transforms**
 - [x] ~~Pre-generate the 4 video GIFs with ffmpeg~~ → not needed; the script downloads the
@@ -434,13 +475,13 @@ would have been keeping the account alive on the free tier.
 - [x] ~~Confirm the production database engine~~ → **PostgreSQL**. Use `pg_dump`; test the
       restore into a scratch DB before Phase 2.
 - [ ] Set bucket **CORS** (admin media preview, any `fetch`/canvas use)
-- [ ] Prove `cdn.zerodesignstudios.com` serves a test object **before** the Phase 1 deploy —
-      otherwise every post-deploy upload stores a URL that 404s, and those rows are not covered
-      by Phase 2
-- [ ] Announce an **editorial freeze** on media deletes/replaces between the Phase 1 deploy and
-      Phase 4 sign-off (Strapi calls the *configured* provider on delete, so deleting a
-      not-yet-migrated Cloudinary asset orphans it), plus a delta pass for rows with
-      `updated_at > migration_start`
+- [ ] Prove `cdn.zerodesignstudios.com` serves a test object **before** setting
+      `UPLOAD_PROVIDER=r2` (Phase 1.3 step 4)
+- [x] ~~Editorial freeze on media deletes/replaces~~ → **not needed**. Checked in
+      `@strapi/plugin-upload@4.13.1`: `remove()` and `replace()` only call the provider when
+      `file.provider === config.provider`. Deleting a not-yet-migrated Cloudinary file just drops
+      the row (its Cloudinary copy becomes an orphan, abandoned anyway); replacing one uploads the
+      new file to R2, and `migrate` then skips that row. Editors can keep working.
 - [ ] Check Cloudinary **account-level auto-optimisation** (`f_auto`/`q_auto` defaults never
       appear in the URL). If enabled, you are served WebP/AVIF today and R2 will serve original
       JPEG/PNG — a real LCP regression. Mitigate with Cloudflare Polish on the `cdn.` hostname.
@@ -450,6 +491,8 @@ would have been keeping the account alive on the free tier.
 - [ ] **`zds-backup` (1.8 MB DB dump) is committed to this repo.** It contains 1,386 Cloudinary
       URLs and full table data — review it for PII/secrets and consider removing it from version
       control independently of this migration.
-- [ ] Regenerate `package-lock.json` on the Phase 1 dependency swap **in the same commit** —
-      `npm ci` in the nixpacks build fails on any package.json/lock mismatch
+- [x] ~~Regenerate `package-lock.json` with the Phase 1 dependency~~ → done in the same commit;
+      `npm ci --dry-run` exits 0
 - [ ] Decide whether to move the store's bucket to a custom domain too
+- [ ] Update the hard-coded logo URL in `zds-client` `BubbleTeamLayout.svelte:94` — after the logo's
+      files row is on R2
